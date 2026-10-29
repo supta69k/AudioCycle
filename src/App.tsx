@@ -632,6 +632,12 @@ export default function App() {
 
   function startDrag(event: React.PointerEvent<HTMLElement>) {
     if (event.button !== 0) return;
+    if (
+      event.currentTarget.tagName !== "BUTTON" &&
+      (event.target as HTMLElement).closest("button, input, select, a")
+    ) {
+      return;
+    }
     dragStarted.current = false;
     dragOffset.current = {
       x: event.screenX - position.x,
@@ -732,8 +738,13 @@ export default function App() {
             </div>
           </div>
           <button
+            type="button"
             className="panel-close-btn"
-            onClick={() => toggleControlPanel(false)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleControlPanel(false);
+            }}
             aria-label="Close control panel"
             title="Close (Esc)"
           >
