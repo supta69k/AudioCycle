@@ -7,6 +7,10 @@
 ## ✨ Features
 
 - **One-Click Output & Input Cycling** — Instantly rotate through active playback devices or switch to **Microphone Mode** via the side toggle button to cycle audio inputs.
+- **AudioCycle Studio Control Panel** — Built-in glassmorphic settings & device studio (`Alt + Shift + S`, right-click orb, or click the gear satellite button) to:
+  - Click any **Output** or **Microphone** device to switch immediately, or toggle **Cycle** per device to skip unused endpoints (like monitor speakers) during 1-click rotation.
+  - Customize the **Floating Logo** emblem (`Vinyl Disc`, `Device Icon`, `Waveform`, `Neon Core`, or `Custom Text/Emoji`), orb **shape** (`Squircle`, `Circle`, `Soft Box`), **size** (`48px` / `58px` / `68px`), and **color theme** (`Auto Device`, presets, or custom hex color pickers).
+  - Configure **App Functions** including Left-Click / Right-Click actions, edge snapping vs. free-floating placement, idle opacity & auto-dim, tooltips, toasts, and Windows startup launch.
 - **Floating Glassmorphic Orb** — Compact, frameless, always-on-top widget with a spinning vinyl emblem and real-time audio activity level bars powered by Windows `IAudioMeterInformation`.
 - **Smart Edge Docking & Multi-Monitor Support** — Drag anywhere across connected displays; automatically clamps to screen bounds and snaps cleanly to the left or right monitor edge.
 - **Live Device Detection & Toast Feedback** — Watches for newly connected or disconnected audio endpoints and shows a subtle toast notification and hover status tooltip.

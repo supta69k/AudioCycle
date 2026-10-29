@@ -5,7 +5,7 @@ use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -21,6 +21,11 @@ fn cycle_audio_output() -> Result<AudioDevice, String> {
 }
 
 #[tauri::command]
+fn set_audio_output(id: String) -> Result<AudioDevice, String> {
+    audio::set_output(&id).map_err(format_audio_error)
+}
+
+#[tauri::command]
 fn list_audio_inputs() -> Result<Vec<AudioDevice>, String> {
     audio::list_inputs().map_err(format_audio_error)
 }
@@ -31,8 +36,40 @@ fn cycle_audio_input() -> Result<AudioDevice, String> {
 }
 
 #[tauri::command]
+fn set_audio_input(id: String) -> Result<AudioDevice, String> {
+    audio::set_input(&id).map_err(format_audio_error)
+}
+
+#[tauri::command]
 fn audio_activity() -> Result<bool, String> {
     audio::is_audio_active().map_err(format_audio_error)
+}
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let autostart = app.autolaunch();
+    let res = if enabled {
+        autostart.enable()
+    } else {
+        autostart.disable()
+    };
+    res.map_err(|e| e.to_string())?;
+    Ok(autostart.is_enabled().unwrap_or(enabled))
+}
+
+#[tauri::command]
+fn set_window_size(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_size(LogicalSize::new(width, height))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -179,9 +216,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_audio_outputs,
             cycle_audio_output,
+            set_audio_output,
             list_audio_inputs,
             cycle_audio_input,
+            set_audio_input,
             audio_activity,
+            get_autostart,
+            set_autostart,
+            set_window_size,
             list_monitors
         ])
         .setup(|app| {

@@ -54,6 +54,26 @@ pub fn cycle_input() -> Result<AudioDevice, AudioError> {
 }
 
 #[cfg(windows)]
+pub fn set_output(device_id: &str) -> Result<AudioDevice, AudioError> {
+    windows_audio::set_output(device_id)
+}
+
+#[cfg(not(windows))]
+pub fn set_output(_device_id: &str) -> Result<AudioDevice, AudioError> {
+    Err(AudioError::UnsupportedPlatform)
+}
+
+#[cfg(windows)]
+pub fn set_input(device_id: &str) -> Result<AudioDevice, AudioError> {
+    windows_audio::set_input(device_id)
+}
+
+#[cfg(not(windows))]
+pub fn set_input(_device_id: &str) -> Result<AudioDevice, AudioError> {
+    Err(AudioError::UnsupportedPlatform)
+}
+
+#[cfg(windows)]
 pub fn is_audio_active() -> Result<bool, AudioError> {
     windows_audio::is_audio_active()
 }
@@ -143,6 +163,59 @@ mod windows_audio {
 
     pub fn cycle_input() -> Result<AudioDevice, AudioError> {
         cycle_device(eCapture, "input")
+    }
+
+    pub fn set_output(device_id: &str) -> Result<AudioDevice, AudioError> {
+        set_device_by_id(eRender, "output", device_id)
+    }
+
+    pub fn set_input(device_id: &str) -> Result<AudioDevice, AudioError> {
+        set_device_by_id(eCapture, "input", device_id)
+    }
+
+    fn set_device_by_id(
+        data_flow: EDataFlow,
+        label: &'static str,
+        target_id: &str,
+    ) -> Result<AudioDevice, AudioError> {
+        let devices = list_devices(
+            data_flow,
+            label,
+            if data_flow == eCapture { "Microphone" } else { "Audio Output" },
+        )?;
+        let target = devices
+            .into_iter()
+            .find(|d| d.id == target_id)
+            .ok_or(AudioError::NoDevices(label))?;
+
+        activate_endpoint(&target.id)?;
+        Ok(AudioDevice {
+            is_default: true,
+            ..target
+        })
+    }
+
+    fn activate_endpoint(endpoint_id: &str) -> Result<(), AudioError> {
+        unsafe {
+            init_com();
+            let policy: IPolicyConfig = CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)
+                .map_err(winerr)?;
+            let wide_id = to_wide(endpoint_id);
+
+            policy
+                .SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), eCommunications)
+                .ok()
+                .map_err(winerr)?;
+            policy
+                .SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), eConsole)
+                .ok()
+                .map_err(winerr)?;
+            policy
+                .SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), eMultimedia)
+                .ok()
+                .map_err(winerr)?;
+        }
+        Ok(())
     }
 
     pub fn is_audio_active() -> Result<bool, AudioError> {

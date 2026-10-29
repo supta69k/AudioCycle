@@ -21,8 +21,6 @@
         "height": 150,
         "minWidth": 228,
         "minHeight": 150,
-        "maxWidth": 228,
-        "maxHeight": 150,
         "resizable": false,
         "decorations": false,
         "transparent": true,
