@@ -7,19 +7,25 @@ import {
   Check,
   ChevronRight,
   CircleDot,
+  Disc3,
   Headphones,
+  Keyboard,
   Mic,
+  MicOff,
   MonitorSpeaker,
+  Music,
   Music2,
   Palette,
   Power,
+  Radio,
   RefreshCw,
   RotateCcw,
   Settings2,
   Sliders,
-  Sparkles,
   Speaker,
+  Volume1,
   Volume2,
+  VolumeX,
   Waves,
   X,
 } from "lucide-react";
@@ -29,6 +35,15 @@ type AudioDevice = {
   id: string;
   name: string;
   is_default: boolean;
+};
+
+type AudioTelemetry = {
+  peak: number;
+  peak_l: number;
+  peak_r: number;
+  volume: number;
+  muted: boolean;
+  active: boolean;
 };
 
 type WidgetPosition = {
@@ -50,7 +65,16 @@ type DockSide = "left" | "right";
 export type LogoStyle = "vinyl" | "device" | "waveform" | "minimal" | "custom";
 export type OrbShape = "squircle" | "circle" | "rounded";
 export type OrbSize = "compact" | "normal" | "large";
-export type ThemePreset = "auto" | "cyber" | "sunset" | "emerald" | "royal" | "mono" | "custom";
+export type ThemePreset =
+  | "auto"
+  | "analog"
+  | "vinylGold"
+  | "cyber"
+  | "sunset"
+  | "emerald"
+  | "royal"
+  | "mono"
+  | "custom";
 export type SpinBehavior = "activity" | "always" | "off";
 export type ClickAction = "cycle-current" | "cycle-output" | "cycle-input" | "open-panel";
 export type RightClickAction = "open-panel" | "toggle-mode" | "hide-widget";
@@ -66,6 +90,9 @@ export type AppSettings = {
   customAccentB: string;
   showEqBars: boolean;
   showPulseWaves: boolean;
+  showVolumeRing: boolean;
+  wheelVolumeControl: boolean;
+  acousticChime: boolean;
   spinBehavior: SpinBehavior;
   clickAction: ClickAction;
   rightClickAction: RightClickAction;
@@ -79,20 +106,22 @@ export type AppSettings = {
 };
 
 const POSITION_KEY = "audiocycle.widget-position";
-const SETTINGS_KEY = "audiocycle.settings.v1";
+const SETTINGS_KEY = "audiocycle.settings.v2";
 const SNAP_MARGIN = 12;
-const COMPACT_WINDOW_WIDTH = 228;
-const COMPACT_WINDOW_HEIGHT = 150;
-const PANEL_WINDOW_WIDTH = 376;
-const PANEL_WINDOW_HEIGHT = 510;
+const COMPACT_WINDOW_WIDTH = 236;
+const COMPACT_WINDOW_HEIGHT = 156;
+const PANEL_WINDOW_WIDTH = 392;
+const PANEL_WINDOW_HEIGHT = 556;
 
 const SIZE_MAP: Record<OrbSize, number> = {
-  compact: 48,
-  normal: 58,
-  large: 68,
+  compact: 50,
+  normal: 60,
+  large: 70,
 };
 
 const THEME_COLORS: Record<Exclude<ThemePreset, "auto" | "custom">, [string, string]> = {
+  analog: ["#f59e0b", "#ef4444"],
+  vinylGold: ["#eab308", "#a855f7"],
   cyber: ["#67e8f9", "#a78bfa"],
   sunset: ["#fb7185", "#fbbf24"],
   emerald: ["#34d399", "#2dd4bf"],
@@ -102,20 +131,23 @@ const THEME_COLORS: Record<Exclude<ThemePreset, "auto" | "custom">, [string, str
 
 const DEFAULT_SETTINGS: AppSettings = {
   logoStyle: "vinyl",
-  customBadge: "AC",
+  customBadge: "LP",
   orbShape: "squircle",
   orbSize: "normal",
-  theme: "auto",
-  customAccentA: "#67e8f9",
-  customAccentB: "#a78bfa",
+  theme: "analog",
+  customAccentA: "#f59e0b",
+  customAccentB: "#ef4444",
   showEqBars: true,
   showPulseWaves: true,
+  showVolumeRing: true,
+  wheelVolumeControl: true,
+  acousticChime: true,
   spinBehavior: "activity",
   clickAction: "cycle-current",
   rightClickAction: "open-panel",
   snapToEdges: true,
   idleAutoDim: true,
-  idleOpacity: 0.38,
+  idleOpacity: 0.42,
   showTooltip: true,
   showToast: true,
   showQuickControls: true,
@@ -123,15 +155,107 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const FALLBACK_OUTPUTS: AudioDevice[] = [
-  { id: "out-headphones", name: "Studio Wireless Headphones", is_default: true },
-  { id: "out-speakers", name: "Realtek Desktop Speakers", is_default: false },
-  { id: "out-monitor", name: "LG UltraGear HDMI Display", is_default: false },
+  { id: "out-headphones", name: "Beyerdynamic DT 990 Pro (DAC)", is_default: true },
+  { id: "out-speakers", name: "Yamaha HS8 Studio Monitors", is_default: false },
+  { id: "out-monitor", name: "LG UltraGear HDMI Audio", is_default: false },
+  { id: "out-bt", name: "Sony WH-1000XM5 Bluetooth", is_default: false },
 ];
 
 const FALLBACK_INPUTS: AudioDevice[] = [
-  { id: "in-mic-usb", name: "HyperX QuadCast USB Mic", is_default: true },
-  { id: "in-headset", name: "Wireless Headset Microphone", is_default: false },
+  { id: "in-mic-usb", name: "Shure SM7B + Focusrite Scarlett", is_default: true },
+  { id: "in-headset", name: "Wireless Boom Microphone", is_default: false },
 ];
+
+// Shared Web Audio context for zero-latency studio chimes & test tones
+let sharedAudioCtx: AudioContext | null = null;
+function getAudioContext(): AudioContext | null {
+  try {
+    if (!sharedAudioCtx) {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      sharedAudioCtx = new AudioCtx();
+    }
+    if (sharedAudioCtx.state === "suspended") {
+      void sharedAudioCtx.resume();
+    }
+    return sharedAudioCtx;
+  } catch {
+    return null;
+  }
+}
+
+function playSwitchChime(mode: CycleMode, enabled: boolean) {
+  if (!enabled) return;
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  const now = ctx.currentTime;
+  const notes = mode === "output" ? [523.25, 659.25, 783.99] : [440, 554.37];
+  notes.forEach((freq, idx) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(freq, now + idx * 0.045);
+
+    gain.gain.setValueAtTime(0.0001, now + idx * 0.045);
+    gain.gain.exponentialRampToValueAtTime(0.06, now + idx * 0.045 + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.045 + 0.22);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now + idx * 0.045);
+    osc.stop(now + idx * 0.045 + 0.24);
+  });
+}
+
+function playStudioTestChord(onPeakUpdate?: (l: number, r: number) => void) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  const now = ctx.currentTime;
+  // Warm Cmaj9 studio electric piano voicing
+  const chord = [261.63, 329.63, 392.0, 493.88, 587.33];
+  chord.forEach((freq, idx) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+
+    osc.type = idx % 2 === 0 ? "sine" : "triangle";
+    osc.frequency.setValueAtTime(freq, now + idx * 0.055);
+
+    const start = now + idx * 0.055;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.055 / Math.sqrt(idx + 1), start + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.95);
+
+    if (panner) {
+      panner.pan.setValueAtTime((idx - 2) * 0.35, start);
+      osc.connect(gain);
+      gain.connect(panner);
+      panner.connect(ctx.destination);
+    } else {
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+    }
+
+    osc.start(start);
+    osc.stop(start + 1.0);
+  });
+
+  if (onPeakUpdate) {
+    let step = 0;
+    const timer = window.setInterval(() => {
+      step += 1;
+      const decay = Math.max(0, 1 - step / 18);
+      const l = Math.min(1, decay * (0.68 + Math.sin(step * 0.9) * 0.22));
+      const r = Math.min(1, decay * (0.66 + Math.cos(step * 0.85) * 0.24));
+      onPeakUpdate(l, r);
+      if (step >= 18) {
+        window.clearInterval(timer);
+        onPeakUpdate(0, 0);
+      }
+    }, 50);
+  }
+}
 
 function loadPosition(): WidgetPosition {
   try {
@@ -145,7 +269,7 @@ function loadPosition(): WidgetPosition {
 
 function loadSettings(): AppSettings {
   try {
-    const saved = localStorage.getItem(SETTINGS_KEY);
+    const saved = localStorage.getItem(SETTINGS_KEY) ?? localStorage.getItem("audiocycle.settings.v1");
     if (saved) {
       return { ...DEFAULT_SETTINGS, ...(JSON.parse(saved) as Partial<AppSettings>) };
     }
@@ -162,7 +286,7 @@ const FALLBACK_MONITOR: MonitorBounds = {
   height: window.screen.availHeight || 1080,
 };
 
-function getNearestMonitor(point: WidgetPosition, monitors: MonitorBounds[], orbPixels = 58): MonitorBounds {
+function getNearestMonitor(point: WidgetPosition, monitors: MonitorBounds[], orbPixels = 60): MonitorBounds {
   const candidates = monitors.length ? monitors : [FALLBACK_MONITOR];
   const centerX = point.x + orbPixels / 2;
   const centerY = point.y + orbPixels / 2;
@@ -225,8 +349,18 @@ function getDeviceKind(device?: AudioDevice): DeviceKind {
 
   const name = device.name.toLowerCase();
 
-  if (name.includes("bluetooth") || name.includes("bt ")) return "bluetooth";
-  if (name.includes("headphone") || name.includes("headset") || name.includes("earbud")) return "headphones";
+  if (name.includes("bluetooth") || name.includes("bt ") || name.includes("xm5") || name.includes("airpods")) {
+    return "bluetooth";
+  }
+  if (
+    name.includes("headphone") ||
+    name.includes("headset") ||
+    name.includes("earbud") ||
+    name.includes("dac") ||
+    name.includes("dt ")
+  ) {
+    return "headphones";
+  }
   if (
     name.includes("monitor") ||
     name.includes("display") ||
@@ -236,13 +370,37 @@ function getDeviceKind(device?: AudioDevice): DeviceKind {
   ) {
     return "monitor";
   }
-  if (name.includes("speaker") || name.includes("realtek")) return "speaker";
+  if (name.includes("speaker") || name.includes("realtek") || name.includes("yamaha")) return "speaker";
 
   return "default";
 }
 
-function DeviceIcon({ kind, size = 22 }: { kind: DeviceKind; size?: number }) {
-  const iconProps = { size, strokeWidth: 2.2 };
+function getDeviceKindLabel(kind: DeviceKind, mode: CycleMode): string {
+  if (mode === "input") return "STUDIO INPUT";
+  switch (kind) {
+    case "headphones":
+      return "HI-FI CANS";
+    case "speaker":
+      return "MONITORS";
+    case "monitor":
+      return "HDMI / DISPLAY";
+    case "bluetooth":
+      return "WIRELESS BT";
+    case "empty":
+      return "OFFLINE";
+    default:
+      return "LINE OUT";
+  }
+}
+
+function formatDb(scalar: number, muted: boolean): string {
+  if (muted || scalar <= 0.005) return "-∞ dB";
+  const db = 20 * Math.log10(scalar);
+  return `${db >= -0.2 ? "0.0" : db.toFixed(1)} dB`;
+}
+
+function DeviceIcon({ kind, size = 20 }: { kind: DeviceKind; size?: number }) {
+  const iconProps = { size, strokeWidth: 2.15 };
 
   switch (kind) {
     case "bluetooth":
@@ -254,7 +412,7 @@ function DeviceIcon({ kind, size = 22 }: { kind: DeviceKind; size?: number }) {
     case "speaker":
       return <Speaker {...iconProps} />;
     case "empty":
-      return <Power size={size - 1} strokeWidth={2.2} />;
+      return <Power size={size - 1} strokeWidth={2.15} />;
     default:
       return <Volume2 {...iconProps} />;
   }
@@ -266,41 +424,117 @@ function FloatingLogoGlyph({
   kind,
   spinning,
   barsActive,
+  peak,
+  muted,
 }: {
   settings: AppSettings;
   mode: CycleMode;
   kind: DeviceKind;
   spinning: boolean;
   barsActive: boolean;
+  peak: number;
+  muted: boolean;
 }) {
-  const iconSize = settings.orbSize === "compact" ? 20 : settings.orbSize === "large" ? 27 : 24;
+  const iconSize = settings.orbSize === "compact" ? 18 : settings.orbSize === "large" ? 25 : 21;
+  const barMultipliers = [0.55, 0.9, 1.25, 0.8, 0.6];
 
   return (
-    <span className={`audio-mark ${spinning ? "is-spinning" : ""} ${barsActive ? "is-active" : ""}`} aria-hidden="true">
+    <span
+      className={`audio-mark ${spinning ? "is-spinning" : ""} ${barsActive ? "is-active" : ""} ${
+        muted ? "is-muted" : ""
+      }`}
+      aria-hidden="true"
+    >
       <span className={`audio-disc style-${settings.logoStyle}`}>
-        {settings.logoStyle === "vinyl" && <Music2 size={iconSize} strokeWidth={2.3} />}
+        {settings.logoStyle === "vinyl" && (
+          <>
+            <span className="vinyl-grooves" />
+            <span className="vinyl-label">
+              <span className="vinyl-spindle" />
+            </span>
+          </>
+        )}
         {settings.logoStyle === "device" &&
           (mode === "input" ? (
-            <Mic size={iconSize} strokeWidth={2.25} />
+            muted ? (
+              <MicOff size={iconSize} strokeWidth={2.2} />
+            ) : (
+              <Mic size={iconSize} strokeWidth={2.2} />
+            )
+          ) : muted ? (
+            <VolumeX size={iconSize} strokeWidth={2.2} />
           ) : (
             <DeviceIcon kind={kind} size={iconSize} />
           ))}
-        {settings.logoStyle === "waveform" && <AudioWaveform size={iconSize} strokeWidth={2.25} />}
-        {settings.logoStyle === "minimal" && <CircleDot size={iconSize} strokeWidth={2.25} />}
+        {settings.logoStyle === "waveform" && <AudioWaveform size={iconSize} strokeWidth={2.2} />}
+        {settings.logoStyle === "minimal" && <CircleDot size={iconSize} strokeWidth={2.2} />}
         {settings.logoStyle === "custom" && (
-          <span className="custom-badge-text">{(settings.customBadge || "AC").slice(0, 3)}</span>
+          <span className="custom-badge-text">{(settings.customBadge || "LP").slice(0, 3)}</span>
         )}
       </span>
+
+      {settings.logoStyle === "vinyl" && (
+        <span className={`vinyl-tonearm ${barsActive || spinning ? "engaged" : ""}`} />
+      )}
+
       {settings.showEqBars && (
         <span className="audio-bars">
-          <i />
-          <i />
-          <i />
-          <i />
-          <i />
+          {barMultipliers.map((mult, idx) => {
+            const dynamicHeight = barsActive
+              ? Math.max(4, Math.min(14, Math.round(4 + peak * 11 * mult)))
+              : [5, 8, 11, 7, 4][idx];
+            return <i key={idx} style={{ height: `${dynamicHeight}px` }} />;
+          })}
         </span>
       )}
     </span>
+  );
+}
+
+function StereoVuMeterBridge({
+  peakL,
+  peakR,
+  muted,
+  active,
+}: {
+  peakL: number;
+  peakR: number;
+  muted: boolean;
+  active: boolean;
+}) {
+  const segments = 16;
+  const effL = muted ? 0 : peakL;
+  const effR = muted ? 0 : peakR;
+
+  const renderRow = (label: string, level: number) => {
+    const litCount = Math.round(Math.pow(level, 0.65) * segments);
+    return (
+      <div className="vu-channel-row">
+        <span className="vu-ch-label">{label}</span>
+        <div className="vu-led-strip">
+          {Array.from({ length: segments }).map((_, i) => {
+            const isLit = active && i < litCount;
+            const zone = i >= 14 ? "clip" : i >= 10 ? "warn" : "nominal";
+            return <span key={i} className={`vu-led zone-${zone} ${isLit ? "lit" : ""}`} />;
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="vu-bridge" aria-label="Stereo VU Level Meter">
+      {renderRow("L", effL)}
+      {renderRow("R", effR)}
+      <div className="vu-scale-row">
+        <span>-36</span>
+        <span>-18</span>
+        <span>-12</span>
+        <span>-6</span>
+        <span>-3</span>
+        <span className="vu-clip-tag">CLIP</span>
+      </div>
+    </div>
   );
 }
 
@@ -315,7 +549,15 @@ export default function App() {
   const [isHidden, setIsHidden] = useState(false);
   const [isIdle, setIsIdle] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [audioActive, setAudioActive] = useState(false);
+  const [telemetry, setTelemetry] = useState<AudioTelemetry>({
+    peak: 0,
+    peak_l: 0,
+    peak_r: 0,
+    volume: 0.78,
+    muted: false,
+    active: false,
+  });
+  const [synthPeaks, setSynthPeaks] = useState<{ l: number; r: number }>({ l: 0, r: 0 });
   const [toast, setToast] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("devices");
@@ -324,6 +566,8 @@ export default function App() {
   const dragOffset = useRef({ x: 0, y: 0 });
   const dragStarted = useRef(false);
   const savedOrbPosition = useRef<WidgetPosition | null>(null);
+  const modeRef = useRef<CycleMode>(mode);
+  modeRef.current = mode;
 
   const appWindow = useMemo(() => {
     try {
@@ -338,7 +582,12 @@ export default function App() {
   const activeDevice = visibleDevices.find((device) => device.is_default) ?? visibleDevices[0];
   const activeKind = getDeviceKind(activeDevice);
   const dockSide = getDockSide(position, monitors, orbPixels);
-  const isAudioPresent = Boolean(activeDevice) && audioActive && !isHidden;
+
+  const effectivePeakL = Math.max(telemetry.peak_l, synthPeaks.l);
+  const effectivePeakR = Math.max(telemetry.peak_r, synthPeaks.r);
+  const effectivePeak = Math.max(telemetry.peak, effectivePeakL, effectivePeakR);
+  const isAudioPresent =
+    Boolean(activeDevice) && (telemetry.active || effectivePeak > 0.015) && !telemetry.muted && !isHidden;
 
   const shouldSpin =
     settings.spinBehavior === "always" || (settings.spinBehavior === "activity" && isAudioPresent);
@@ -359,14 +608,53 @@ export default function App() {
 
   async function refreshDevices() {
     try {
-      const nextDevices = await invoke<AudioDevice[]>("list_audio_outputs");
-      setDevices(nextDevices);
-      const nextInputDevices = await invoke<AudioDevice[]>("list_audio_inputs");
-      setInputDevices(nextInputDevices);
+      const [nextOutputs, nextInputs] = await Promise.all([
+        invoke<AudioDevice[]>("list_audio_outputs"),
+        invoke<AudioDevice[]>("list_audio_inputs"),
+      ]);
+      setDevices(nextOutputs);
+      setInputDevices(nextInputs);
     } catch {
-      // Provide fallback devices in browser preview when Tauri backend is unavailable
       setDevices((current) => (current.length ? current : FALLBACK_OUTPUTS));
       setInputDevices((current) => (current.length ? current : FALLBACK_INPUTS));
+    }
+  }
+
+  async function refreshTelemetry(targetMode = modeRef.current) {
+    try {
+      const next = await invoke<AudioTelemetry>("get_audio_telemetry", { mode: targetMode });
+      setTelemetry(next);
+    } catch {
+      // Browser preview fallback: keep smooth interactive state
+    }
+  }
+
+  async function handleVolumeChange(newLevel: number) {
+    const clamped = Math.min(1, Math.max(0, newLevel));
+    setTelemetry((prev) => ({ ...prev, volume: clamped, muted: clamped <= 0.005 ? prev.muted : false }));
+    try {
+      const updated = await invoke<AudioTelemetry>("set_device_volume", {
+        mode,
+        level: clamped,
+      });
+      setTelemetry(updated);
+    } catch {
+      // Browser preview fallback already updated local state
+    }
+  }
+
+  async function handleToggleMute() {
+    const nextMuted = !telemetry.muted;
+    setTelemetry((prev) => ({ ...prev, muted: nextMuted }));
+    showNotification(nextMuted ? "Master Muted" : `Unmuted (${Math.round(telemetry.volume * 100)}%)`);
+    try {
+      const updated = await invoke<AudioTelemetry>("set_device_mute", {
+        mode,
+        muted: nextMuted,
+      });
+      setTelemetry(updated);
+    } catch {
+      // Browser preview fallback
     }
   }
 
@@ -435,22 +723,29 @@ export default function App() {
   }
 
   useEffect(() => {
-    refreshDevices();
-    refreshMonitors();
-    refreshAutostart();
+    void refreshDevices();
+    void refreshMonitors();
+    void refreshAutostart();
+    void refreshTelemetry();
 
-    const poll = window.setInterval(refreshDevices, 5000);
-    const activityPoll = window.setInterval(async () => {
-      try {
-        setAudioActive(await invoke<boolean>("audio_activity"));
-      } catch {
-        setAudioActive(false);
-      }
-    }, 350);
-    const monitorPoll = window.setInterval(refreshMonitors, 10000);
+    // Faster telemetry cadence when Studio Console is open for crisp VU metering
+    const telemetryInterval = window.setInterval(
+      () => {
+        void refreshTelemetry();
+      },
+      panelOpen ? 140 : 300,
+    );
+
+    const monitorPoll = window.setInterval(refreshMonitors, 12000);
     const unlisteners = [
-      listen("audio-devices-changed", refreshDevices),
+      listen("audio-devices-changed", () => {
+        void refreshDevices();
+        void refreshTelemetry();
+      }),
       listen("toggle-widget", () => setIsHidden((current) => !current)),
+      listen("cycle-active-shortcut", () => {
+        void cycleTargetMode(modeRef.current);
+      }),
       listen("open-settings", () => {
         setIsHidden(false);
         toggleControlPanel(true);
@@ -458,14 +753,17 @@ export default function App() {
     ];
 
     return () => {
-      window.clearInterval(poll);
-      window.clearInterval(activityPoll);
+      window.clearInterval(telemetryInterval);
       window.clearInterval(monitorPoll);
       unlisteners.forEach((promise) => {
         promise.then((unlisten) => unlisten()).catch(() => undefined);
       });
     };
-  }, []);
+  }, [panelOpen]);
+
+  useEffect(() => {
+    void refreshTelemetry(mode);
+  }, [mode]);
 
   useEffect(() => {
     if (!settings.idleAutoDim || panelOpen || switching || isDragging || toast) {
@@ -500,6 +798,8 @@ export default function App() {
         setIsHidden((current) => !current);
       } else if (event.altKey && event.shiftKey && event.code === "KeyS") {
         toggleControlPanel();
+      } else if (event.altKey && event.shiftKey && event.code === "KeyC") {
+        void cycleTargetMode(modeRef.current);
       } else if (event.key === "Escape" && panelOpen) {
         toggleControlPanel(false);
       }
@@ -512,7 +812,8 @@ export default function App() {
   function toggleMode() {
     setMode((current) => {
       const next = current === "output" ? "input" : "output";
-      showNotification(next === "input" ? "Microphone mode" : "Audio output mode");
+      playSwitchChime(next, settings.acousticChime);
+      showNotification(next === "input" ? "Studio Mic Deck" : "Master Output Deck");
       return next;
     });
   }
@@ -530,9 +831,10 @@ export default function App() {
       } else {
         setInputDevices(applySelection);
       }
+      playSwitchChime(targetMode, settings.acousticChime);
       showNotification(updated.name);
+      void refreshTelemetry(targetMode);
     } catch {
-      // Browser preview fallback
       const applyLocal = (list: AudioDevice[]) =>
         list.map((d) => ({ ...d, is_default: d.id === deviceId }));
       const source = targetMode === "output" ? devices : inputDevices;
@@ -542,6 +844,7 @@ export default function App() {
       } else {
         setInputDevices(applyLocal);
       }
+      playSwitchChime(targetMode, settings.acousticChime);
       if (chosen) showNotification(chosen.name);
     } finally {
       window.setTimeout(() => setSwitching(false), 220);
@@ -577,9 +880,10 @@ export default function App() {
       } else {
         setInputDevices(updateDevices);
       }
+      playSwitchChime(targetMode, settings.acousticChime);
       showNotification(nextDevice.name);
+      void refreshTelemetry(targetMode);
     } catch {
-      // Fallback in browser preview
       if (effectivePool.length > 0) {
         const currentIndex = effectivePool.findIndex((d) => d.is_default);
         const nextDevice = effectivePool[(currentIndex + 1) % effectivePool.length];
@@ -608,6 +912,22 @@ export default function App() {
       case "open-panel":
         toggleControlPanel();
         break;
+    }
+  }
+
+  function handleOrbWheel(event: React.WheelEvent) {
+    if (!settings.wheelVolumeControl) return;
+    event.preventDefault();
+    const step = event.deltaY < 0 ? 0.04 : -0.04;
+    const nextVol = Math.min(1, Math.max(0, telemetry.volume + step));
+    void handleVolumeChange(nextVol);
+    showNotification(`${mode === "output" ? "Master" : "Mic Gain"} ${Math.round(nextVol * 100)}%`);
+  }
+
+  function handleOrbAuxClick(event: React.MouseEvent) {
+    if (event.button === 1) {
+      event.preventDefault();
+      void handleToggleMute();
     }
   }
 
@@ -684,6 +1004,8 @@ export default function App() {
     const vars: Record<string, string> = {
       "--orb-size": `${orbPixels}px`,
       "--idle-opacity": String(settings.idleOpacity),
+      "--vol-pct": `${Math.round((telemetry.muted ? 0 : telemetry.volume) * 100)}%`,
+      "--peak-scale": String(1 + effectivePeak * 0.25),
     };
 
     if (settings.theme === "custom") {
@@ -701,14 +1023,20 @@ export default function App() {
   if (isHidden) {
     return (
       <button className="restore-button" onClick={() => setIsHidden(false)} aria-label="Show AudioCycle">
-        <Volume2 size={17} />
+        <Disc3 size={18} />
       </button>
     );
   }
 
   if (panelOpen) {
+    const volumePct = Math.round(telemetry.volume * 100);
+
     return (
       <section className="control-panel" style={getThemeCssVars()}>
+        {/* Rack Screws Aesthetic */}
+        <span className="rack-screw top-left" aria-hidden="true" />
+        <span className="rack-screw top-right" aria-hidden="true" />
+
         <header
           className="panel-header"
           onPointerDown={startDrag}
@@ -728,29 +1056,109 @@ export default function App() {
                 kind={activeKind}
                 spinning={shouldSpin}
                 barsActive={isAudioPresent}
+                peak={effectivePeak}
+                muted={telemetry.muted}
               />
             </div>
-            <div>
-              <h1 className="panel-title">AudioCycle Studio</h1>
+            <div className="panel-brand-meta">
+              <div className="panel-title-row">
+                <h1 className="panel-title">AUDIOCYCLE</h1>
+                <span className={`on-air-badge ${isAudioPresent ? "live" : ""}`}>
+                  <i />
+                  {isAudioPresent ? "ON AIR" : "STANDBY"}
+                </span>
+              </div>
               <p className="panel-subtitle">
-                {mode === "output" ? "Output" : "Mic"}: {activeDevice?.name ?? "No active device"}
+                {activeDevice?.name ?? "No active endpoint"}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="panel-close-btn"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleControlPanel(false);
-            }}
-            aria-label="Close control panel"
-            title="Close (Esc)"
-          >
-            <X size={15} />
-          </button>
+
+          <div className="panel-header-actions">
+            <button
+              type="button"
+              className="studio-chime-btn"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                playStudioTestChord((l, r) => setSynthPeaks({ l, r }));
+                showNotification("Playing Studio Test Chord ♪");
+              }}
+              title="Play Acoustic Test Chord on active output"
+            >
+              <Music size={12} />
+              <span>Test</span>
+            </button>
+
+            <button
+              type="button"
+              className="panel-close-btn"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleControlPanel(false);
+              }}
+              aria-label="Close Studio Console"
+              title="Close Console (Esc)"
+            >
+              <X size={14} />
+            </button>
+          </div>
         </header>
+
+        {/* STUDIO MASTER BRIDGE: VU Meters + Hardware Fader */}
+        <div className="master-bridge">
+          <div className="master-bridge-top">
+            <StereoVuMeterBridge
+              peakL={effectivePeakL}
+              peakR={effectivePeakR}
+              muted={telemetry.muted}
+              active={isAudioPresent}
+            />
+            <div className="master-readout-box">
+              <span className="readout-label">{mode === "output" ? "MASTER OUT" : "MIC GAIN"}</span>
+              <span className={`readout-db ${telemetry.muted ? "is-muted" : ""}`}>
+                {formatDb(telemetry.volume, telemetry.muted)}
+              </span>
+              <span className="readout-pct">{telemetry.muted ? "MUTED" : `${volumePct}%`}</span>
+            </div>
+          </div>
+
+          <div className="master-fader-row">
+            <button
+              type="button"
+              className={`mute-pad-btn ${telemetry.muted ? "active" : ""}`}
+              onClick={handleToggleMute}
+              title={telemetry.muted ? "Unmute endpoint" : "Mute endpoint"}
+            >
+              {telemetry.muted ? <VolumeX size={14} /> : telemetry.volume < 0.4 ? <Volume1 size={14} /> : <Volume2 size={14} />}
+              <span>{telemetry.muted ? "MUTED" : "MUTE"}</span>
+            </button>
+
+            <div className="fader-track-wrap">
+              <input
+                type="range"
+                className="studio-fader"
+                min={0}
+                max={1}
+                step={0.01}
+                value={telemetry.muted ? 0 : telemetry.volume}
+                onChange={(e) => void handleVolumeChange(parseFloat(e.target.value))}
+                aria-label="Master Volume Fader"
+              />
+            </div>
+
+            <button
+              type="button"
+              className="cycle-pad-btn"
+              onClick={() => void cycleTargetMode(mode)}
+              title="Cycle to next enabled device"
+            >
+              <RefreshCw size={12} className={switching ? "spin-once" : ""} />
+              <span>CYCLE</span>
+            </button>
+          </div>
+        </div>
 
         <nav className="panel-tabs" role="tablist">
           <button
@@ -759,8 +1167,8 @@ export default function App() {
             className={`panel-tab ${panelTab === "devices" ? "active" : ""}`}
             onClick={() => setPanelTab("devices")}
           >
-            <Volume2 size={14} />
-            <span>Devices</span>
+            <Radio size={13} />
+            <span>Patchbay</span>
           </button>
           <button
             role="tab"
@@ -768,8 +1176,8 @@ export default function App() {
             className={`panel-tab ${panelTab === "logo" ? "active" : ""}`}
             onClick={() => setPanelTab("logo")}
           >
-            <Palette size={14} />
-            <span>Floating Logo</span>
+            <Disc3 size={13} />
+            <span>Turntable UI</span>
           </button>
           <button
             role="tab"
@@ -777,8 +1185,8 @@ export default function App() {
             className={`panel-tab ${panelTab === "behavior" ? "active" : ""}`}
             onClick={() => setPanelTab("behavior")}
           >
-            <Sliders size={14} />
-            <span>Functions</span>
+            <Sliders size={13} />
+            <span>Console</span>
           </button>
         </nav>
 
@@ -791,33 +1199,30 @@ export default function App() {
                   onClick={() => setMode("output")}
                 >
                   <Speaker size={13} />
-                  <span>Outputs ({devices.length})</span>
+                  <span>Monitors & Cans ({devices.length})</span>
                 </button>
                 <button
                   className={`segment-btn ${mode === "input" ? "active" : ""}`}
                   onClick={() => setMode("input")}
                 >
                   <Mic size={13} />
-                  <span>Microphones ({inputDevices.length})</span>
+                  <span>Mic Inputs ({inputDevices.length})</span>
                 </button>
                 <button
                   className="icon-action-btn"
-                  onClick={refreshDevices}
-                  title="Refresh audio devices"
+                  onClick={() => void refreshDevices()}
+                  title="Rescan Windows CoreAudio bus"
                   aria-label="Refresh audio devices"
                 >
                   <RefreshCw size={13} />
                 </button>
               </div>
 
-              <p className="pane-hint">
-                Click a device to switch immediately. Uncheck <strong>Cycle</strong> to skip unused endpoints when clicking the floating orb.
-              </p>
-
               <div className="device-list">
-                {visibleDevices.map((device) => {
+                {visibleDevices.map((device, idx) => {
                   const excluded = settings.excludedDeviceIds.includes(device.id);
                   const kind = getDeviceKind(device);
+                  const chLabel = `CH 0${idx + 1}`;
                   return (
                     <div
                       key={device.id}
@@ -827,17 +1232,19 @@ export default function App() {
                     >
                       <button
                         className="device-select-btn"
-                        onClick={() => selectSpecificDevice(mode, device.id)}
-                        title={`Switch to ${device.name}`}
+                        onClick={() => void selectSpecificDevice(mode, device.id)}
+                        title={`Route audio to ${device.name}`}
                       >
                         <span className="device-card-icon">
                           {mode === "input" ? <Mic size={16} /> : <DeviceIcon kind={kind} size={16} />}
                         </span>
                         <span className="device-card-info">
-                          <span className="device-card-name">{device.name}</span>
-                          <span className="device-card-status">
-                            {device.is_default ? "Active Default" : "Click to activate"}
+                          <span className="device-card-top">
+                            <span className="ch-tag">{chLabel}</span>
+                            <span className="kind-tag">{getDeviceKindLabel(kind, mode)}</span>
+                            {device.is_default && <span className="live-dot-badge">ROUTED</span>}
                           </span>
+                          <span className="device-card-name">{device.name}</span>
                         </span>
                       </button>
 
@@ -846,18 +1253,18 @@ export default function App() {
                         onClick={() => toggleDeviceExclusion(device.id)}
                         title={
                           excluded
-                            ? "Excluded from 1-click rotation (click to include)"
-                            : "Included in 1-click rotation (click to skip)"
+                            ? "Bypassed in 1-click rotation (click to include)"
+                            : "In 1-click rotation loop (click to bypass)"
                         }
                       >
-                        {!excluded && <Check size={11} />}
-                        <span>{excluded ? "Skipped" : "Cycle"}</span>
+                        {!excluded && <Check size={10} />}
+                        <span>{excluded ? "BYPASS" : "LOOP"}</span>
                       </button>
                     </div>
                   );
                 })}
                 {visibleDevices.length === 0 && (
-                  <div className="empty-state">No active {mode} devices detected.</div>
+                  <div className="empty-state">No active {mode} channels detected on bus.</div>
                 )}
               </div>
             </div>
@@ -866,15 +1273,15 @@ export default function App() {
           {panelTab === "logo" && (
             <div className="tab-pane">
               <div className="field-group">
-                <label className="field-label">Logo Emblem Style</label>
+                <label className="field-label">Turntable / Emblem Style</label>
                 <div className="choice-grid cols-3">
                   {(
                     [
-                      { id: "vinyl", label: "Vinyl Disc" },
-                      { id: "device", label: "Device Icon" },
-                      { id: "waveform", label: "Waveform" },
-                      { id: "minimal", label: "Neon Core" },
-                      { id: "custom", label: "Custom Text" },
+                      { id: "vinyl", label: "Vinyl LP + Arm" },
+                      { id: "device", label: "Studio Gear" },
+                      { id: "waveform", label: "Oscilloscope" },
+                      { id: "minimal", label: "Tube Core" },
+                      { id: "custom", label: "Custom Label" },
                     ] as const
                   ).map((item) => (
                     <button
@@ -890,68 +1297,32 @@ export default function App() {
 
               {settings.logoStyle === "custom" && (
                 <div className="field-row">
-                  <span className="field-label">Custom Badge (1–3 chars / emoji)</span>
+                  <span className="field-label">Record Label Text (1–3 chars)</span>
                   <input
                     type="text"
                     maxLength={3}
                     value={settings.customBadge}
                     onChange={(e) => updateSetting("customBadge", e.target.value)}
                     className="badge-input"
-                    placeholder="AC"
+                    placeholder="LP"
                   />
                 </div>
               )}
 
               <div className="field-group">
-                <label className="field-label">Floating Orb Shape & Size</label>
+                <label className="field-label">Studio Lighting Theme</label>
                 <div className="choice-grid cols-3">
                   {(
                     [
-                      { id: "squircle", label: "Squircle" },
-                      { id: "circle", label: "Circle" },
-                      { id: "rounded", label: "Soft Box" },
-                    ] as const
-                  ).map((item) => (
-                    <button
-                      key={item.id}
-                      className={`choice-chip ${settings.orbShape === item.id ? "active" : ""}`}
-                      onClick={() => updateSetting("orbShape", item.id)}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-                <div className="choice-grid cols-3 mt-1">
-                  {(
-                    [
-                      { id: "compact", label: "Small (48px)" },
-                      { id: "normal", label: "Medium (58px)" },
-                      { id: "large", label: "Large (68px)" },
-                    ] as const
-                  ).map((item) => (
-                    <button
-                      key={item.id}
-                      className={`choice-chip ${settings.orbSize === item.id ? "active" : ""}`}
-                      onClick={() => updateSetting("orbSize", item.id)}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="field-group">
-                <label className="field-label">Accent Color Theme</label>
-                <div className="choice-grid cols-3">
-                  {(
-                    [
-                      { id: "auto", label: "Auto Device" },
-                      { id: "cyber", label: "Cyber Cyan" },
-                      { id: "sunset", label: "Sunset Rose" },
-                      { id: "emerald", label: "Emerald" },
-                      { id: "royal", label: "Royal Violet" },
+                      { id: "analog", label: "Analog Tube" },
+                      { id: "vinylGold", label: "Vinyl Gold" },
+                      { id: "auto", label: "Auto Signal" },
+                      { id: "emerald", label: "SSL Emerald" },
+                      { id: "cyber", label: "Synth Cyan" },
+                      { id: "sunset", label: "Warm Tape" },
+                      { id: "royal", label: "Velvet Club" },
                       { id: "mono", label: "Monochrome" },
-                      { id: "custom", label: "Custom Colors" },
+                      { id: "custom", label: "Custom Duo" },
                     ] as const
                   ).map((item) => (
                     <button
@@ -967,7 +1338,7 @@ export default function App() {
                 {settings.theme === "custom" && (
                   <div className="color-pickers-row">
                     <label className="color-picker-item">
-                      <span>Primary</span>
+                      <span>Primary Tone</span>
                       <input
                         type="color"
                         value={settings.customAccentA}
@@ -975,7 +1346,7 @@ export default function App() {
                       />
                     </label>
                     <label className="color-picker-item">
-                      <span>Secondary</span>
+                      <span>Harmonic Accent</span>
                       <input
                         type="color"
                         value={settings.customAccentB}
@@ -987,13 +1358,51 @@ export default function App() {
               </div>
 
               <div className="field-group">
-                <label className="field-label">Spin & Equalizer Animations</label>
+                <label className="field-label">Floating Pod Geometry & Size</label>
                 <div className="choice-grid cols-3">
                   {(
                     [
-                      { id: "activity", label: "Spin on Audio" },
-                      { id: "always", label: "Always Spin" },
-                      { id: "off", label: "No Spin" },
+                      { id: "squircle", label: "MPC Pad" },
+                      { id: "circle", label: "Turntable" },
+                      { id: "rounded", label: "Rack Unit" },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      className={`choice-chip ${settings.orbShape === item.id ? "active" : ""}`}
+                      onClick={() => updateSetting("orbShape", item.id)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="choice-grid cols-3 mt-1">
+                  {(
+                    [
+                      { id: "compact", label: "50px Mini" },
+                      { id: "normal", label: "60px Studio" },
+                      { id: "large", label: "70px Master" },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      className={`choice-chip ${settings.orbSize === item.id ? "active" : ""}`}
+                      onClick={() => updateSetting("orbSize", item.id)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field-group">
+                <label className="field-label">Platter Motor & Visual Telemetry</label>
+                <div className="choice-grid cols-3">
+                  {(
+                    [
+                      { id: "activity", label: "Spin on Signal" },
+                      { id: "always", label: "33⅓ RPM Always" },
+                      { id: "off", label: "Static Deck" },
                     ] as const
                   ).map((item) => (
                     <button
@@ -1008,7 +1417,7 @@ export default function App() {
 
                 <div className="toggle-list mt-1">
                   <label className="toggle-row">
-                    <span>Show Mini Equalizer Bars</span>
+                    <span>Live VU Spectrum Bars on Pod</span>
                     <input
                       type="checkbox"
                       checked={settings.showEqBars}
@@ -1016,7 +1425,15 @@ export default function App() {
                     />
                   </label>
                   <label className="toggle-row">
-                    <span>Outer Pulse Wave Rings</span>
+                    <span>Radial Volume & Peak Halo Ring</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.showVolumeRing}
+                      onChange={(e) => updateSetting("showVolumeRing", e.target.checked)}
+                    />
+                  </label>
+                  <label className="toggle-row">
+                    <span>Acoustic Sub-Bass Pulse Waves</span>
                     <input
                       type="checkbox"
                       checked={settings.showPulseWaves}
@@ -1030,36 +1447,69 @@ export default function App() {
 
           {panelTab === "behavior" && (
             <div className="tab-pane">
+              <div className="hotkey-banner">
+                <Keyboard size={14} />
+                <div className="hotkey-list">
+                  <span>
+                    <kbd>Alt+Shift+C</kbd> Cycle
+                  </span>
+                  <span>
+                    <kbd>Alt+Shift+A</kbd> Hide
+                  </span>
+                  <span>
+                    <kbd>Scroll</kbd> Vol
+                  </span>
+                </div>
+              </div>
+
               <div className="field-group">
-                <label className="field-label">Left-Click Orb Action</label>
+                <label className="field-label">Primary Left-Click Action</label>
                 <select
                   className="panel-select"
                   value={settings.clickAction}
                   onChange={(e) => updateSetting("clickAction", e.target.value as ClickAction)}
                 >
-                  <option value="cycle-current">Cycle Active Mode (Output or Mic)</option>
-                  <option value="cycle-output">Always Cycle Audio Outputs</option>
+                  <option value="cycle-current">Cycle Active Bus (Outputs or Mics)</option>
+                  <option value="cycle-output">Always Cycle Master Outputs</option>
                   <option value="cycle-input">Always Cycle Microphones</option>
-                  <option value="open-panel">Open Control Panel</option>
+                  <option value="open-panel">Open Studio Console</option>
                 </select>
               </div>
 
               <div className="field-group">
-                <label className="field-label">Right-Click Orb Action</label>
+                <label className="field-label">Right-Click Action</label>
                 <select
                   className="panel-select"
                   value={settings.rightClickAction}
                   onChange={(e) => updateSetting("rightClickAction", e.target.value as RightClickAction)}
                 >
-                  <option value="open-panel">Open Control Panel</option>
-                  <option value="toggle-mode">Switch Output / Microphone Mode</option>
-                  <option value="hide-widget">Hide Floating Widget</option>
+                  <option value="open-panel">Open Studio Console</option>
+                  <option value="toggle-mode">Flip Output / Microphone Deck</option>
+                  <option value="hide-widget">Minimize to System Tray</option>
                 </select>
               </div>
 
               <div className="toggle-list">
                 <label className="toggle-row">
-                  <span>Snap Orb to Left / Right Screen Edge</span>
+                  <span>Acoustic Harmonic Chime on Switch</span>
+                  <input
+                    type="checkbox"
+                    checked={settings.acousticChime}
+                    onChange={(e) => updateSetting("acousticChime", e.target.checked)}
+                  />
+                </label>
+
+                <label className="toggle-row">
+                  <span>Mouse-Wheel Volume Fader on Floating Pod</span>
+                  <input
+                    type="checkbox"
+                    checked={settings.wheelVolumeControl}
+                    onChange={(e) => updateSetting("wheelVolumeControl", e.target.checked)}
+                  />
+                </label>
+
+                <label className="toggle-row">
+                  <span>Magnetic Screen-Edge Dock Snap</span>
                   <input
                     type="checkbox"
                     checked={settings.snapToEdges}
@@ -1068,7 +1518,7 @@ export default function App() {
                 </label>
 
                 <label className="toggle-row">
-                  <span>Show Side Mode & Settings Buttons</span>
+                  <span>Show Side Satellite Controls</span>
                   <input
                     type="checkbox"
                     checked={settings.showQuickControls}
@@ -1100,25 +1550,7 @@ export default function App() {
                 )}
 
                 <label className="toggle-row">
-                  <span>Show Device Name Tooltip on Hover</span>
-                  <input
-                    type="checkbox"
-                    checked={settings.showTooltip}
-                    onChange={(e) => updateSetting("showTooltip", e.target.checked)}
-                  />
-                </label>
-
-                <label className="toggle-row">
-                  <span>Show Toast Notification on Switch</span>
-                  <input
-                    type="checkbox"
-                    checked={settings.showToast}
-                    onChange={(e) => updateSetting("showToast", e.target.checked)}
-                  />
-                </label>
-
-                <label className="toggle-row">
-                  <span>Launch AudioCycle on Windows Startup</span>
+                  <span>Launch AudioCycle on Windows Boot</span>
                   <input type="checkbox" checked={autostart} onChange={toggleAutostart} />
                 </label>
               </div>
@@ -1128,11 +1560,11 @@ export default function App() {
                 onClick={() => {
                   setSettings(DEFAULT_SETTINGS);
                   localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
-                  showNotification("Settings restored to defaults");
+                  showNotification("Factory Studio Defaults Restored");
                 }}
               >
                 <RotateCcw size={13} />
-                <span>Reset All Customizations</span>
+                <span>Restore Factory Studio Defaults</span>
               </button>
             </div>
           )}
@@ -1146,12 +1578,16 @@ export default function App() {
       <button
         className={`widget dock-${dockSide} shape-${settings.orbShape} size-${settings.orbSize} mode-${mode} kind-${activeKind} ${
           settings.theme !== "auto" ? "custom-theme" : ""
-        } ${isDragging ? "dragging" : ""} ${switching ? "switching" : ""} ${isIdle ? "idle" : ""}`}
+        } ${isDragging ? "dragging" : ""} ${switching ? "switching" : ""} ${isIdle ? "idle" : ""} ${
+          isAudioPresent ? "audio-live" : ""
+        }`}
         aria-label={mode === "output" ? "Cycle audio output" : "Cycle microphone input"}
-        title={`${mode === "output" ? "Output" : "Microphone"}: ${
-          activeDevice?.name ?? `No active ${mode === "output" ? "audio outputs" : "microphones"}`
-        } (Right-click for Control Panel)`}
+        title={`${mode === "output" ? "Output" : "Mic"}: ${
+          activeDevice?.name ?? "None"
+        } • Vol ${Math.round(telemetry.volume * 100)}% (Scroll: Volume, Middle-Click: Mute, Right-Click: Studio Console)`}
         onClick={handlePrimaryOrbClick}
+        onWheel={handleOrbWheel}
+        onAuxClick={handleOrbAuxClick}
         onContextMenu={handleOrbContextMenu}
         onMouseEnter={() => setIsIdle(false)}
         onPointerDown={startDrag}
@@ -1165,14 +1601,24 @@ export default function App() {
             <span className="edge-wave edge-wave-two" />
           </>
         )}
+
+        {settings.showVolumeRing && (
+          <span className="orb-volume-ring" aria-hidden="true" />
+        )}
+
         <span className="widget-ripple" />
-        <span className="device-glyph" key={`${mode}-${activeDevice?.id ?? "empty"}-${activeKind}-${settings.logoStyle}`}>
+        <span
+          className="device-glyph"
+          key={`${mode}-${activeDevice?.id ?? "empty"}-${activeKind}-${settings.logoStyle}`}
+        >
           <FloatingLogoGlyph
             settings={settings}
             mode={mode}
             kind={activeKind}
             spinning={shouldSpin}
             barsActive={isAudioPresent}
+            peak={effectivePeak}
+            muted={telemetry.muted}
           />
         </span>
         <span className="mode-dot" title={mode === "output" ? "Output" : "Input"} />
@@ -1183,7 +1629,7 @@ export default function App() {
           <button
             className={`mode-toggle dock-${dockSide} mode-${mode}`}
             aria-label={mode === "output" ? "Switch to microphone mode" : "Switch to audio output mode"}
-            title={mode === "output" ? "Switch to microphone" : "Switch to output"}
+            title={mode === "output" ? "Flip to Microphone Deck" : "Flip to Output Deck"}
             onClick={toggleMode}
           >
             <ChevronRight size={14} strokeWidth={2.6} />
@@ -1191,8 +1637,8 @@ export default function App() {
 
           <button
             className={`settings-toggle dock-${dockSide}`}
-            aria-label="Open AudioCycle Control Panel"
-            title="Open Control Panel (Alt+Shift+S)"
+            aria-label="Open AudioCycle Studio Console"
+            title="Open Studio Console (Alt+Shift+S)"
             onClick={() => toggleControlPanel(true)}
           >
             <Settings2 size={13} strokeWidth={2.3} />
@@ -1202,11 +1648,16 @@ export default function App() {
 
       {settings.showTooltip && (
         <div className="tooltip" role="status">
-          <Waves size={12} />
-          <span>
-            {mode === "output" ? "Output" : "Mic"}:{" "}
-            {activeDevice?.name ?? `No active ${mode === "output" ? "audio outputs" : "microphones"}`}
-          </span>
+          <Waves size={12} className="tooltip-wave-icon" />
+          <div className="tooltip-text">
+            <span className="tooltip-device">
+              {activeDevice?.name ?? `No ${mode === "output" ? "outputs" : "mics"}`}
+            </span>
+            <span className="tooltip-meta">
+              {telemetry.muted ? "MUTED" : `VOL ${Math.round(telemetry.volume * 100)}%`} •{" "}
+              {getDeviceKindLabel(activeKind, mode)}
+            </span>
+          </div>
         </div>
       )}
 

@@ -1,6 +1,6 @@
 mod audio;
 
-use audio::{AudioDevice, AudioError};
+use audio::{AudioDevice, AudioError, AudioTelemetry};
 use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -46,6 +46,24 @@ fn audio_activity() -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn get_audio_telemetry(mode: Option<String>) -> Result<AudioTelemetry, String> {
+    let is_input = matches!(mode.as_deref(), Some("input"));
+    audio::get_telemetry(is_input).map_err(format_audio_error)
+}
+
+#[tauri::command]
+fn set_device_volume(mode: Option<String>, level: f32) -> Result<AudioTelemetry, String> {
+    let is_input = matches!(mode.as_deref(), Some("input"));
+    audio::set_master_volume(is_input, level).map_err(format_audio_error)
+}
+
+#[tauri::command]
+fn set_device_mute(mode: Option<String>, muted: bool) -> Result<AudioTelemetry, String> {
+    let is_input = matches!(mode.as_deref(), Some("input"));
+    audio::set_master_mute(is_input, muted).map_err(format_audio_error)
+}
+
+#[tauri::command]
 fn get_autostart(app: AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or(false)
 }
@@ -79,15 +97,19 @@ fn ensure_single_instance() -> bool {
     use windows::Win32::System::Threading::CreateMutexW;
     let name: Vec<u16> = "AudioCycle.SingleInstance\0".encode_utf16().collect();
     unsafe {
-        let Ok(mutex) = CreateMutexW(None, false, PCWSTR(name.as_ptr())) else { return true; };
+        let Ok(mutex) = CreateMutexW(None, false, PCWSTR(name.as_ptr())) else {
+            return true;
+        };
         let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
-        std::mem::forget(mutex);
+        let _ = mutex;
         !already_running
     }
 }
 
 #[cfg(not(windows))]
-fn ensure_single_instance() -> bool { true }
+fn ensure_single_instance() -> bool {
+    true
+}
 
 #[derive(Serialize)]
 struct MonitorBounds {
@@ -123,17 +145,21 @@ fn format_audio_error(error: AudioError) -> String {
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let cycle_now = MenuItem::with_id(app, "cycle_now", "Cycle Output Device", true, None::<&str>)?;
     let show_hide = MenuItem::with_id(app, "show_hide", "Hide / Show Widget", true, None::<&str>)?;
     let startup = MenuItem::with_id(app, "startup", "Launch on Startup", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Studio Console", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit AudioCycle", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_hide, &startup, &settings, &quit])?;
+    let menu = Menu::with_items(app, &[&cycle_now, &show_hide, &startup, &settings, &quit])?;
 
     TrayIconBuilder::new()
-        .tooltip("AudioCycle")
+        .tooltip("AudioCycle Studio")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
+            "cycle_now" => {
+                let _ = app.emit("cycle-active-shortcut", ());
+            }
             "show_hide" => {
                 let _ = app.emit("toggle-widget", ());
             }
@@ -167,13 +193,28 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn setup_shortcuts(app: &AppHandle) -> tauri::Result<()> {
-    let shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyA);
-    if let Err(error) = app.global_shortcut().on_shortcut(shortcut, |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            let _ = app.emit("toggle-widget", ());
-        }
-    }) {
-        eprintln!("failed to register global shortcut: {error}");
+    let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyA);
+    if let Err(error) =
+        app.global_shortcut()
+            .on_shortcut(toggle_shortcut, |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    let _ = app.emit("toggle-widget", ());
+                }
+            })
+    {
+        eprintln!("failed to register toggle global shortcut: {error}");
+    }
+
+    let cycle_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyC);
+    if let Err(error) =
+        app.global_shortcut()
+            .on_shortcut(cycle_shortcut, |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    let _ = app.emit("cycle-active-shortcut", ());
+                }
+            })
+    {
+        eprintln!("failed to register cycle global shortcut: {error}");
     }
 
     Ok(())
@@ -221,6 +262,9 @@ pub fn run() {
             cycle_audio_input,
             set_audio_input,
             audio_activity,
+            get_audio_telemetry,
+            set_device_volume,
+            set_device_mute,
             get_autostart,
             set_autostart,
             set_window_size,
