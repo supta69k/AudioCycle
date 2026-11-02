@@ -1,13 +1,13 @@
 [package]
 name = "audiocycle"
 version = "0.1.0"
-description = "A microscopic desktop audio output switcher."
+description = "A minimalist desktop audio output & input switcher for Windows."
 authors = ["AudioCycle"]
 edition = "2021"
 
 [lib]
 name = "audiocycle_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.2", features = [] }
@@ -17,7 +17,6 @@ serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2.2"
 tauri-plugin-global-shortcut = "2.2"
-tauri-plugin-opener = "2.2"
 thiserror = "1"
 
 [target.'cfg(windows)'.dependencies]
@@ -33,3 +32,10 @@ windows = { version = "0.58", features = [
   "Win32_Security",
   "Win32_UI_Shell_PropertiesSystem"
 ] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

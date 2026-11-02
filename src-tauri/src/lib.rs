@@ -1,283 +1,59 @@
 mod audio;
+mod commands;
+mod instance;
+mod tray;
 
-use audio::{AudioDevice, AudioError, AudioTelemetry};
-use serde::Serialize;
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition,
-};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-
-#[tauri::command]
-fn list_audio_outputs() -> Result<Vec<AudioDevice>, String> {
-    audio::list_outputs().map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn cycle_audio_output() -> Result<AudioDevice, String> {
-    audio::cycle_output().map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn set_audio_output(id: String) -> Result<AudioDevice, String> {
-    audio::set_output(&id).map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn list_audio_inputs() -> Result<Vec<AudioDevice>, String> {
-    audio::list_inputs().map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn cycle_audio_input() -> Result<AudioDevice, String> {
-    audio::cycle_input().map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn set_audio_input(id: String) -> Result<AudioDevice, String> {
-    audio::set_input(&id).map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn audio_activity() -> Result<bool, String> {
-    audio::is_audio_active().map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn get_audio_telemetry(mode: Option<String>) -> Result<AudioTelemetry, String> {
-    let is_input = matches!(mode.as_deref(), Some("input"));
-    audio::get_telemetry(is_input).map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn set_device_volume(mode: Option<String>, level: f32) -> Result<AudioTelemetry, String> {
-    let is_input = matches!(mode.as_deref(), Some("input"));
-    audio::set_master_volume(is_input, level).map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn set_device_mute(mode: Option<String>, muted: bool) -> Result<AudioTelemetry, String> {
-    let is_input = matches!(mode.as_deref(), Some("input"));
-    audio::set_master_mute(is_input, muted).map_err(format_audio_error)
-}
-
-#[tauri::command]
-fn get_autostart(app: AppHandle) -> bool {
-    app.autolaunch().is_enabled().unwrap_or(false)
-}
-
-#[tauri::command]
-fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
-    let autostart = app.autolaunch();
-    let res = if enabled {
-        autostart.enable()
-    } else {
-        autostart.disable()
-    };
-    res.map_err(|e| e.to_string())?;
-    Ok(autostart.is_enabled().unwrap_or(enabled))
-}
-
-#[tauri::command]
-fn set_window_size(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window
-            .set_size(LogicalSize::new(width, height))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn ensure_single_instance() -> bool {
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows::Win32::System::Threading::CreateMutexW;
-    let name: Vec<u16> = "AudioCycle.SingleInstance\0".encode_utf16().collect();
-    unsafe {
-        let Ok(mutex) = CreateMutexW(None, false, PCWSTR(name.as_ptr())) else {
-            return true;
-        };
-        let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
-        let _ = mutex;
-        !already_running
-    }
-}
-
-#[cfg(not(windows))]
-fn ensure_single_instance() -> bool {
-    true
-}
-
-#[derive(Serialize)]
-struct MonitorBounds {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
-
-#[tauri::command]
-fn list_monitors(app: AppHandle) -> Result<Vec<MonitorBounds>, String> {
-    app.available_monitors()
-        .map(|monitors| {
-            monitors
-                .into_iter()
-                .map(|monitor| {
-                    let position = monitor.position();
-                    let size = monitor.size();
-                    MonitorBounds {
-                        x: position.x,
-                        y: position.y,
-                        width: size.width,
-                        height: size.height,
-                    }
-                })
-                .collect()
-        })
-        .map_err(|error| error.to_string())
-}
-
-fn format_audio_error(error: AudioError) -> String {
-    error.to_string()
-}
-
-fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let cycle_now = MenuItem::with_id(app, "cycle_now", "Cycle Output Device", true, None::<&str>)?;
-    let show_hide = MenuItem::with_id(app, "show_hide", "Hide / Show Widget", true, None::<&str>)?;
-    let startup = MenuItem::with_id(app, "startup", "Launch on Startup", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Studio Console", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit AudioCycle", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&cycle_now, &show_hide, &startup, &settings, &quit])?;
-
-    TrayIconBuilder::new()
-        .tooltip("AudioCycle Studio")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "cycle_now" => {
-                let _ = app.emit("cycle-active-shortcut", ());
-            }
-            "show_hide" => {
-                let _ = app.emit("toggle-widget", ());
-            }
-            "startup" => {
-                let autostart = app.autolaunch();
-                let _ = if autostart.is_enabled().unwrap_or(false) {
-                    autostart.disable()
-                } else {
-                    autostart.enable()
-                };
-            }
-            "settings" => {
-                let _ = app.emit("open-settings", ());
-            }
-            "quit" => app.exit(0),
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let _ = tray.app_handle().emit("toggle-widget", ());
-            }
-        })
-        .build(app)?;
-
-    Ok(())
-}
-
-fn setup_shortcuts(app: &AppHandle) -> tauri::Result<()> {
-    let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyA);
-    if let Err(error) =
-        app.global_shortcut()
-            .on_shortcut(toggle_shortcut, |app, _shortcut, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = app.emit("toggle-widget", ());
-                }
-            })
-    {
-        eprintln!("failed to register toggle global shortcut: {error}");
-    }
-
-    let cycle_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyC);
-    if let Err(error) =
-        app.global_shortcut()
-            .on_shortcut(cycle_shortcut, |app, _shortcut, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = app.emit("cycle-active-shortcut", ());
-                }
-            })
-    {
-        eprintln!("failed to register cycle global shortcut: {error}");
-    }
-
-    Ok(())
-}
-
-fn start_device_watcher(app: AppHandle) {
-    std::thread::spawn(move || {
-        let mut last_signature = String::new();
-
-        loop {
-            let output_signature = device_signature(audio::list_outputs().unwrap_or_default());
-            let input_signature = device_signature(audio::list_inputs().unwrap_or_default());
-            let signature = format!("{output_signature}::{input_signature}");
-
-            if !signature.is_empty() && signature != last_signature {
-                last_signature = signature;
-                let _ = app.emit("audio-devices-changed", ());
-            }
-
-            std::thread::sleep(std::time::Duration::from_secs(3));
-        }
-    });
-}
+use tauri::{Emitter, Manager, PhysicalPosition};
+use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
     if handle_cli_command() {
         return;
     }
-    if !ensure_single_instance() {
+    if !instance::ensure_single_instance_or_wake() {
         return;
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            list_audio_outputs,
-            cycle_audio_output,
-            set_audio_output,
-            list_audio_inputs,
-            cycle_audio_input,
-            set_audio_input,
-            audio_activity,
-            get_audio_telemetry,
-            set_device_volume,
-            set_device_mute,
-            get_autostart,
-            set_autostart,
-            set_window_size,
-            list_monitors
+            commands::list_audio_outputs,
+            commands::cycle_audio_output,
+            commands::set_audio_output,
+            commands::list_audio_inputs,
+            commands::cycle_audio_input,
+            commands::set_audio_input,
+            commands::audio_activity,
+            commands::get_audio_telemetry,
+            commands::set_device_volume,
+            commands::set_device_mute,
+            commands::get_autostart,
+            commands::set_autostart,
+            commands::set_window_size,
+            commands::list_monitors
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_position(PhysicalPosition::new(0, 180));
             }
-            setup_tray(&handle)?;
-            setup_shortcuts(&handle)?;
-            start_device_watcher(handle);
+
+            tray::setup_tray(&handle)?;
+            tray::setup_shortcuts(&handle)?;
+
+            let wake_handle = handle.clone();
+            instance::spawn_wake_listener(move || {
+                let _ = wake_handle.emit("show-widget", ());
+            });
+
+            audio::subscribe_device_changes(move || {
+                let _ = handle.emit("audio-devices-changed", ());
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -290,23 +66,33 @@ fn handle_cli_command() -> bool {
         return false;
     };
 
-    let result = match command.as_str() {
-        "--cycle-output" | "cycle-output" => audio::cycle_output().map(|_| ()),
-        "--cycle-input" | "cycle-input" => audio::cycle_input().map(|_| ()),
-        _ => return false,
-    };
-
-    if let Err(error) = result {
-        eprintln!("AudioCycle command failed: {}", format_audio_error(error));
+    match command.as_str() {
+        "--cycle-output" | "cycle-output" => {
+            if let Err(e) = audio::cycle_output() {
+                eprintln!(
+                    "AudioCycle command failed: {}",
+                    commands::format_audio_error(e)
+                );
+            }
+            true
+        }
+        "--cycle-input" | "cycle-input" => {
+            if let Err(e) = audio::cycle_input() {
+                eprintln!(
+                    "AudioCycle command failed: {}",
+                    commands::format_audio_error(e)
+                );
+            }
+            true
+        }
+        "--version" | "-V" => {
+            println!("AudioCycle {}", env!("CARGO_PKG_VERSION"));
+            true
+        }
+        "--help" | "-h" => {
+            println!("Usage: AudioCycle.exe [--cycle-output | --cycle-input | --version]");
+            true
+        }
+        _ => false,
     }
-
-    true
-}
-
-fn device_signature(devices: Vec<AudioDevice>) -> String {
-    devices
-        .into_iter()
-        .map(|device| format!("{}:{}", device.id, device.is_default))
-        .collect::<Vec<_>>()
-        .join("|")
 }
