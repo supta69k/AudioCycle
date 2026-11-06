@@ -385,6 +385,13 @@ export default function App() {
 
   async function handlePrimaryClick() {
     if (dragStarted.current || switching) return;
+
+    // While muted, a plain click on the pod just unmutes (no device cycling).
+    if (telemetry.muted && settings.clickAction !== "open-panel") {
+      await handleToggleMute();
+      return;
+    }
+
     switch (settings.clickAction) {
       case "cycle-current":
         await cycleTargetMode(mode);
@@ -410,11 +417,17 @@ export default function App() {
     notify(`${Math.round(next * 100)}`);
   }
 
+  // Middle mouse button (scroll-wheel click) mutes / unmutes the active device.
   function handleAuxClick(e: React.MouseEvent) {
     if (e.button === 1) {
       e.preventDefault();
       void handleToggleMute();
     }
+  }
+
+  // Stop the browser's middle-click auto-scroll cursor from hijacking the click.
+  function handlePodMouseDown(e: React.MouseEvent) {
+    if (e.button === 1) e.preventDefault();
   }
 
   function handleContextMenu(e: React.MouseEvent) {
@@ -787,6 +800,7 @@ export default function App() {
         onClick={handlePrimaryClick}
         onWheel={handleWheel}
         onAuxClick={handleAuxClick}
+        onMouseDown={handlePodMouseDown}
         onContextMenu={handleContextMenu}
         onMouseEnter={() => setIsIdle(false)}
         onPointerDown={startDrag}
