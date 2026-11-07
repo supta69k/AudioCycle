@@ -75,6 +75,8 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelView, setPanelView] = useState<PanelView>("devices");
   const [autostart, setAutostart] = useState(false);
+  const [volumeMode, setVolumeMode] = useState(false);
+  const middleClickTimer = useRef<number | null>(null);
 
   const dragOffset = useRef({ x: 0, y: 0 });
   const dragStarted = useRef(false);
@@ -285,7 +287,7 @@ export default function App() {
   }, [telemetry]);
 
   useEffect(() => {
-    if (!settings.idleAutoDim || panelOpen || switching || isDragging || toast) {
+    if (!settings.idleAutoDim || panelOpen || switching || isDragging || toast || volumeMode) {
       setIsIdle(false);
       return;
     }
@@ -302,6 +304,11 @@ export default function App() {
     if (!panelOpen) setPosition((c) => snapToSide(c, monitors, settings.snapToEdges));
   }, [monitors, settings.snapToEdges]);
 
+  // Volume mode only makes sense on the floating pod.
+  useEffect(() => {
+    if (panelOpen || isHidden) setVolumeMode(false);
+  }, [panelOpen, isHidden]);
+
   useEffect(() => {
     if (!toast) return;
     const t = window.setTimeout(() => setToast(""), 1600);
@@ -313,6 +320,7 @@ export default function App() {
       if (e.altKey && e.shiftKey && e.code === "KeyA") setIsHidden((c) => !c);
       else if (e.altKey && e.shiftKey && e.code === "KeyS") toggleControlPanel();
       else if (e.altKey && e.shiftKey && e.code === "KeyC") void cycleTargetMode(modeRef.current);
+      else if (e.key === "Escape" && volumeMode) setVolumeMode(false);
       else if (e.key === "Escape" && panelOpen) toggleControlPanel(false);
     }
     window.addEventListener("keydown", onKey);
@@ -410,19 +418,47 @@ export default function App() {
     }
   }
 
+  /**
+   * Scroll-wheel volume.
+   * - Normal: scrolling while hovering the pod (if "Scroll to change volume" is on).
+   * - Volume mode (double middle-click): scrolling anywhere over the widget, regardless of the setting.
+   */
   function handleWheel(e: React.WheelEvent) {
-    if (!settings.wheelVolumeControl) return;
+    const overPod = Boolean((e.target as HTMLElement).closest(".pod"));
+    const allowed = volumeMode || (settings.wheelVolumeControl && overPod);
+    if (!allowed) return;
     const next = Math.min(1, Math.max(0, telemetry.volume + (e.deltaY < 0 ? 0.04 : -0.04)));
     void handleVolumeChange(next);
-    notify(`${Math.round(next * 100)}`);
+    if (!volumeMode) notify(`${Math.round(next * 100)}`);
   }
 
-  // Middle mouse button (scroll-wheel click) mutes / unmutes the active device.
+  function toggleVolumeMode() {
+    const next = !volumeMode;
+    setVolumeMode(next);
+    notify(next ? "Volume mode · scroll" : "Volume mode off");
+    playTone(modeRef.current, settings.switchTone);
+  }
+
+  /**
+   * Middle mouse button (scroll-wheel click):
+   * - single click  → mute / unmute (fires after a short wait so a double click can be told apart)
+   * - double click  → enter / leave volume mode
+   */
   function handleAuxClick(e: React.MouseEvent) {
-    if (e.button === 1) {
-      e.preventDefault();
-      void handleToggleMute();
+    if (e.button !== 1) return;
+    e.preventDefault();
+
+    if (middleClickTimer.current !== null) {
+      window.clearTimeout(middleClickTimer.current);
+      middleClickTimer.current = null;
+      toggleVolumeMode();
+      return;
     }
+
+    middleClickTimer.current = window.setTimeout(() => {
+      middleClickTimer.current = null;
+      void handleToggleMute();
+    }, 260);
   }
 
   // Stop the browser's middle-click auto-scroll cursor from hijacking the click.
@@ -793,12 +829,11 @@ export default function App() {
   }
 
   return (
-    <main className={`widget-root dock-${dockSide}`} style={cssVars}>
+    <main className={`widget-root dock-${dockSide}`} style={cssVars} onWheel={handleWheel}>
       <button
-        className={`pod shape-${settings.orbShape} ${isDragging ? "dragging" : ""} ${switching ? "switching" : ""} ${isIdle ? "idle" : ""} ${live ? "live" : ""} ${mode === "input" ? "is-input" : ""}`}
+        className={`pod shape-${settings.orbShape} ${isDragging ? "dragging" : ""} ${switching ? "switching" : ""} ${isIdle ? "idle" : ""} ${live ? "live" : ""} ${mode === "input" ? "is-input" : ""} ${volumeMode ? "vol-mode" : ""}`}
         aria-label={mode === "output" ? "Cycle audio output" : "Cycle microphone"}
         onClick={handlePrimaryClick}
-        onWheel={handleWheel}
         onAuxClick={handleAuxClick}
         onMouseDown={handlePodMouseDown}
         onContextMenu={handleContextMenu}
@@ -815,7 +850,14 @@ export default function App() {
         <span className="pod-badge" aria-hidden="true" />
       </button>
 
-      {settings.showQuickControls && (
+      {volumeMode && (
+        <div className="mode-tag" role="status" aria-live="polite">
+          <span>VOL</span>
+          <b>{pad2(volumePct)}</b>
+        </div>
+      )}
+
+      {settings.showQuickControls && !volumeMode && (
         <div className="side-controls">
           <button
             onClick={toggleMode}
