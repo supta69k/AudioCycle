@@ -441,8 +441,8 @@ export default function App() {
 
   /**
    * Middle mouse button (scroll-wheel click):
-   * - single click  → mute / unmute (fires after a short wait so a double click can be told apart)
-   * - double click  → enter / leave volume mode
+   * - single click  → enter / leave volume mode (fires after a short wait so a double click can be told apart)
+   * - double click  → mute / unmute
    */
   function handleAuxClick(e: React.MouseEvent) {
     if (e.button !== 1) return;
@@ -451,13 +451,13 @@ export default function App() {
     if (middleClickTimer.current !== null) {
       window.clearTimeout(middleClickTimer.current);
       middleClickTimer.current = null;
-      toggleVolumeMode();
+      void handleToggleMute();
       return;
     }
 
     middleClickTimer.current = window.setTimeout(() => {
       middleClickTimer.current = null;
-      void handleToggleMute();
+      toggleVolumeMode();
     }, 260);
   }
 
