@@ -420,16 +420,12 @@ export default function App() {
 
   /**
    * Scroll-wheel volume.
-   * - Normal: scrolling while hovering the pod (if "Scroll to change volume" is on).
-   * - Volume mode (double middle-click): scrolling anywhere over the widget, regardless of the setting.
+   * Only active in volume mode (single middle-click); scrolling anywhere over the widget changes volume.
    */
   function handleWheel(e: React.WheelEvent) {
-    const overPod = Boolean((e.target as HTMLElement).closest(".pod"));
-    const allowed = volumeMode || (settings.wheelVolumeControl && overPod);
-    if (!allowed) return;
+    if (!volumeMode) return;
     const next = Math.min(1, Math.max(0, telemetry.volume + (e.deltaY < 0 ? 0.04 : -0.04)));
     void handleVolumeChange(next);
-    if (!volumeMode) notify(`${Math.round(next * 100)}`);
   }
 
   function toggleVolumeMode() {
@@ -745,11 +741,6 @@ export default function App() {
                     <option value="hide-widget">Hide</option>
                   </select>
                 </div>
-                <Toggle
-                  label="Scroll to change volume"
-                  checked={settings.wheelVolumeControl}
-                  onChange={(v) => updateSetting("wheelVolumeControl", v)}
-                />
                 <Toggle
                   label="Switch tone"
                   checked={settings.switchTone}
