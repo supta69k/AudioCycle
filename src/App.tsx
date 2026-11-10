@@ -76,7 +76,9 @@ export default function App() {
   const [panelView, setPanelView] = useState<PanelView>("devices");
   const [autostart, setAutostart] = useState(false);
   const [volumeMode, setVolumeMode] = useState(false);
+  const [podHovered, setPodHovered] = useState(false);
   const middleClickTimer = useRef<number | null>(null);
+  const hoverLeaveTimer = useRef<number | null>(null);
 
   const dragOffset = useRef({ x: 0, y: 0 });
   const dragStarted = useRef(false);
@@ -287,13 +289,13 @@ export default function App() {
   }, [telemetry]);
 
   useEffect(() => {
-    if (!settings.idleAutoDim || panelOpen || switching || isDragging || toast || volumeMode) {
+    if (!settings.idleAutoDim || panelOpen || switching || isDragging || toast || volumeMode || podHovered) {
       setIsIdle(false);
       return;
     }
     const t = window.setTimeout(() => setIsIdle(true), 2600);
     return () => window.clearTimeout(t);
-  }, [settings.idleAutoDim, panelOpen, isDragging, switching, toast, activeDevice?.id, mode]);
+  }, [settings.idleAutoDim, panelOpen, isDragging, switching, toast, volumeMode, podHovered, activeDevice?.id, mode]);
 
   useEffect(() => {
     localStorage.setItem(POSITION_KEY, JSON.stringify(position));
@@ -306,7 +308,10 @@ export default function App() {
 
   // Volume mode only makes sense on the floating pod.
   useEffect(() => {
-    if (panelOpen || isHidden) setVolumeMode(false);
+    if (panelOpen || isHidden) {
+      setVolumeMode(false);
+      setPodHovered(false);
+    }
   }, [panelOpen, isHidden]);
 
   useEffect(() => {
@@ -820,15 +825,32 @@ export default function App() {
   }
 
   return (
-    <main className={`widget-root dock-${dockSide}`} style={cssVars} onWheel={handleWheel}>
+    <main className={`widget-root dock-${dockSide} ${podHovered ? "pod-active" : ""}`} style={cssVars}>
       <button
         className={`pod shape-${settings.orbShape} ${isDragging ? "dragging" : ""} ${switching ? "switching" : ""} ${isIdle ? "idle" : ""} ${live ? "live" : ""} ${mode === "input" ? "is-input" : ""} ${volumeMode ? "vol-mode" : ""}`}
         aria-label={mode === "output" ? "Cycle audio output" : "Cycle microphone"}
         onClick={handlePrimaryClick}
+        onWheel={handleWheel}
         onAuxClick={handleAuxClick}
         onMouseDown={handlePodMouseDown}
         onContextMenu={handleContextMenu}
-        onMouseEnter={() => setIsIdle(false)}
+        onMouseEnter={() => {
+          if (hoverLeaveTimer.current !== null) {
+            window.clearTimeout(hoverLeaveTimer.current);
+            hoverLeaveTimer.current = null;
+          }
+          setPodHovered(true);
+          setIsIdle(false);
+        }}
+        onMouseLeave={() => {
+          if (hoverLeaveTimer.current !== null) {
+            window.clearTimeout(hoverLeaveTimer.current);
+          }
+          hoverLeaveTimer.current = window.setTimeout(() => {
+            hoverLeaveTimer.current = null;
+            setPodHovered(false);
+          }, 120);
+        }}
         onPointerDown={startDrag}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
@@ -849,7 +871,25 @@ export default function App() {
       )}
 
       {settings.showQuickControls && !volumeMode && (
-        <div className="side-controls">
+        <div
+          className="side-controls"
+          onMouseEnter={() => {
+            if (!podHovered) return;
+            if (hoverLeaveTimer.current !== null) {
+              window.clearTimeout(hoverLeaveTimer.current);
+              hoverLeaveTimer.current = null;
+            }
+          }}
+          onMouseLeave={() => {
+            if (hoverLeaveTimer.current !== null) {
+              window.clearTimeout(hoverLeaveTimer.current);
+            }
+            hoverLeaveTimer.current = window.setTimeout(() => {
+              hoverLeaveTimer.current = null;
+              setPodHovered(false);
+            }, 120);
+          }}
+        >
           <button
             onClick={toggleMode}
             title={mode === "output" ? "Switch to input" : "Switch to output"}
