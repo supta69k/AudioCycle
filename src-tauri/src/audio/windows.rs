@@ -60,15 +60,30 @@ struct EndpointSession {
 #[derive(Default)]
 struct ThreadAudioCache {
     com_initialized: bool,
+    co_initialized_here: bool,
     enumerator: Option<IMMDeviceEnumerator>,
     output_session: Option<EndpointSession>,
     input_session: Option<EndpointSession>,
 }
 
+impl Drop for ThreadAudioCache {
+    fn drop(&mut self) {
+        self.output_session = None;
+        self.input_session = None;
+        self.enumerator = None;
+        if self.co_initialized_here {
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
+}
+
 impl ThreadAudioCache {
     unsafe fn ensure_enumerator(&mut self) -> Result<&IMMDeviceEnumerator, AudioError> {
         if !self.com_initialized {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            self.co_initialized_here = hr.is_ok();
             self.com_initialized = true;
         }
         if self.enumerator.is_none() {
@@ -93,11 +108,15 @@ impl ThreadAudioCache {
         if !slot_matches {
             let flow = if is_input { eCapture } else { eRender };
             let enumerator = self.ensure_enumerator()?.clone();
-            let device = enumerator
-                .GetDefaultAudioEndpoint(flow, eConsole)
-                .map_err(winerr)?;
-            let meter = device.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None).ok();
-            let volume = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok();
+            let device_opt = enumerator.GetDefaultAudioEndpoint(flow, eConsole).ok();
+            let (meter, volume) = if let Some(ref device) = device_opt {
+                (
+                    device.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None).ok(),
+                    device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok(),
+                )
+            } else {
+                (None, None)
+            };
             let session = EndpointSession {
                 generation: current_gen,
                 meter,
@@ -245,18 +264,21 @@ fn activate_endpoint(endpoint_id: &str) -> Result<(), AudioError> {
             CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL).map_err(winerr)?;
         let wide_id = to_wide(endpoint_id);
 
-        policy
-            .SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), eCommunications)
-            .ok()
-            .map_err(winerr)?;
-        policy
-            .SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), eConsole)
-            .ok()
-            .map_err(winerr)?;
-        policy
-            .SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), eMultimedia)
-            .ok()
-            .map_err(winerr)?;
+        let mut success = false;
+        let mut last_err = None;
+
+        for role in [eConsole, eMultimedia, eCommunications] {
+            match policy.SetDefaultEndpoint(PCWSTR(wide_id.as_ptr()), role).ok() {
+                Ok(_) => success = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        if !success {
+            if let Some(err) = last_err {
+                return Err(winerr(err));
+            }
+        }
     }
     bump_generation();
     Ok(())
@@ -560,9 +582,7 @@ unsafe fn default_device_id(
 
 unsafe fn device_id(device: &IMMDevice) -> Result<String, AudioError> {
     let id = device.GetId().map_err(winerr)?;
-    let value = id
-        .to_string()
-        .map_err(|error| AudioError::Windows(error.to_string()))?;
+    let value = String::from_utf16_lossy(id.as_wide());
     CoTaskMemFree(Some(id.0 as *const c_void));
     Ok(value)
 }
@@ -576,9 +596,7 @@ unsafe fn device_name(device: &IMMDevice) -> Result<String, AudioError> {
     let _ = PropVariantClear(&mut variant);
     let value = result.map_err(winerr)?;
 
-    let name = value
-        .to_string()
-        .map_err(|error| AudioError::Windows(error.to_string()))?;
+    let name = String::from_utf16_lossy(value.as_wide());
     CoTaskMemFree(Some(value.0 as *const c_void));
     Ok(name)
 }

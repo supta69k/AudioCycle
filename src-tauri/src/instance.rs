@@ -1,7 +1,10 @@
 #[cfg(windows)]
+static MUTEX_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(windows)]
 pub fn ensure_single_instance_or_wake() -> bool {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent};
 
     let mutex_name: Vec<u16> = "AudioCycle.SingleInstance\0".encode_utf16().collect();
@@ -12,15 +15,18 @@ pub fn ensure_single_instance_or_wake() -> bool {
             return true;
         };
         let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
-        let _ = mutex;
 
         if already_running {
             // Wake the running instance so launching the shortcut reveals a hidden widget
             if let Ok(event) = CreateEventW(None, false, false, PCWSTR(event_name.as_ptr())) {
                 let _ = SetEvent(event);
+                let _ = CloseHandle(event);
             }
+            let _ = CloseHandle(mutex);
             return false;
         }
+
+        MUTEX_HANDLE.store(mutex.0 as isize, std::sync::atomic::Ordering::Relaxed);
         true
     }
 }

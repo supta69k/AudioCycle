@@ -79,6 +79,8 @@ export default function App() {
   const [podHovered, setPodHovered] = useState(false);
   const middleClickTimer = useRef<number | null>(null);
   const hoverLeaveTimer = useRef<number | null>(null);
+  const dragRaf = useRef<number | null>(null);
+  const pendingPos = useRef<WidgetPosition | null>(null);
 
   const dragOffset = useRef({ x: 0, y: 0 });
   const dragStarted = useRef(false);
@@ -173,9 +175,24 @@ export default function App() {
 
   async function refreshMonitors() {
     try {
-      setMonitors(await invoke<MonitorBounds[]>("list_monitors"));
+      const next = await invoke<MonitorBounds[]>("list_monitors");
+      setMonitors((prev) => {
+        if (
+          prev.length === next.length &&
+          prev.every(
+            (m, i) =>
+              m.x === next[i].x &&
+              m.y === next[i].y &&
+              m.width === next[i].width &&
+              m.height === next[i].height,
+          )
+        ) {
+          return prev;
+        }
+        return next;
+      });
     } catch {
-      setMonitors([FALLBACK_MONITOR]);
+      setMonitors((prev) => (prev.length ? prev : [FALLBACK_MONITOR]));
     }
   }
 
@@ -254,16 +271,21 @@ export default function App() {
     };
   }, []);
 
-  // Pause telemetry polling completely when the widget is hidden (0% idle IPC overhead)
+  // Dynamic telemetry polling:
+  // - 100ms when panel is open (responsive VU meter ballistics)
+  // - 160ms when active/live, hovered, or in volume mode
+  // - 400ms when idle & silent (saves CPU and battery for laptops)
+  // - Paused completely when hidden (0% CPU)
   useEffect(() => {
     if (isHidden) return;
     void refreshTelemetry();
+    const interval = panelOpen ? 100 : (!isIdle || liveHold || volumeMode) ? 160 : 400;
     const telemetryTimer = window.setInterval(
       () => void refreshTelemetry(),
-      panelOpen ? 100 : 160,
+      interval,
     );
     return () => window.clearInterval(telemetryTimer);
-  }, [panelOpen, isHidden]);
+  }, [panelOpen, isHidden, isIdle, liveHold, volumeMode]);
 
   useEffect(() => {
     void refreshTelemetry(mode);
@@ -279,14 +301,15 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [liveRaw]);
 
-  // Meter ballistics: fast attack, slow release.
+  // Meter ballistics: fast attack, slow release (only calculated when control panel is open).
   useEffect(() => {
+    if (!panelOpen) return;
     const target = telemetry.muted ? 0 : Math.max(telemetry.peak_l, telemetry.peak_r, telemetry.peak);
     setMeterLevel((prev) => {
       const next = target >= prev ? target : prev * 0.72 + target * 0.28;
       return next < 0.004 ? 0 : next;
     });
-  }, [telemetry]);
+  }, [telemetry, panelOpen]);
 
   useEffect(() => {
     if (!settings.idleAutoDim || panelOpen || switching || isDragging || toast || volumeMode || podHovered) {
@@ -298,9 +321,10 @@ export default function App() {
   }, [settings.idleAutoDim, panelOpen, isDragging, switching, toast, volumeMode, podHovered, activeDevice?.id, mode]);
 
   useEffect(() => {
+    if (isDragging) return;
     localStorage.setItem(POSITION_KEY, JSON.stringify(position));
     appWindow?.setPosition(new LogicalPosition(position.x, position.y)).catch(() => undefined);
-  }, [appWindow, position]);
+  }, [appWindow, position, isDragging]);
 
   useEffect(() => {
     if (!panelOpen) setPosition((c) => snapToSide(c, monitors, settings.snapToEdges));
@@ -511,14 +535,36 @@ export default function App() {
     if (Math.abs(next.x - position.x) > 2 || Math.abs(next.y - position.y) > 2) {
       dragStarted.current = true;
     }
-    setPosition(next);
+    pendingPos.current = next;
+
+    if (dragRaf.current === null) {
+      dragRaf.current = requestAnimationFrame(() => {
+        dragRaf.current = null;
+        if (pendingPos.current) {
+          const target = pendingPos.current;
+          setPosition(target);
+          appWindow?.setPosition(new LogicalPosition(target.x, target.y)).catch(() => undefined);
+        }
+      });
+    }
   }
 
   function endDrag(e: React.PointerEvent<HTMLElement>) {
     if (!isDragging) return;
+    if (dragRaf.current !== null) {
+      cancelAnimationFrame(dragRaf.current);
+      dragRaf.current = null;
+    }
     e.currentTarget.releasePointerCapture(e.pointerId);
     setIsDragging(false);
-    if (!panelOpen) setPosition((c) => snapToSide(c, monitors, settings.snapToEdges));
+
+    const target = pendingPos.current ?? position;
+    const finalPos = !panelOpen ? snapToSide(target, monitors, settings.snapToEdges) : target;
+    pendingPos.current = null;
+    setPosition(finalPos);
+    localStorage.setItem(POSITION_KEY, JSON.stringify(finalPos));
+    appWindow?.setPosition(new LogicalPosition(finalPos.x, finalPos.y)).catch(() => undefined);
+
     window.setTimeout(() => {
       dragStarted.current = false;
     }, 0);
