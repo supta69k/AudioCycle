@@ -12,7 +12,18 @@ import type { AppSettings, AudioDevice, DeviceKind, DockSide, MonitorBounds, Wid
 export function loadPosition(): WidgetPosition {
   try {
     const saved = localStorage.getItem(POSITION_KEY);
-    if (saved) return JSON.parse(saved) as WidgetPosition;
+    if (saved) {
+      const parsed = JSON.parse(saved) as WidgetPosition;
+      if (
+        parsed &&
+        typeof parsed.x === "number" &&
+        typeof parsed.y === "number" &&
+        Number.isFinite(parsed.x) &&
+        Number.isFinite(parsed.y)
+      ) {
+        return parsed;
+      }
+    }
   } catch {
     // default
   }

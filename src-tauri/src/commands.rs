@@ -91,6 +91,7 @@ pub fn set_window_size(app: AppHandle, width: f64, height: f64) -> Result<(), St
         window
             .set_size(LogicalSize::new(width, height))
             .map_err(|e| e.to_string())?;
+        crate::pin_window_topmost(&window);
     }
     Ok(())
 }
@@ -104,11 +105,12 @@ pub fn list_monitors(app: AppHandle) -> Result<Vec<MonitorBounds>, String> {
                 .map(|monitor| {
                     let position = monitor.position();
                     let size = monitor.size();
+                    let scale = monitor.scale_factor().max(1.0);
                     MonitorBounds {
-                        x: position.x,
-                        y: position.y,
-                        width: size.width,
-                        height: size.height,
+                        x: (position.x as f64 / scale).round() as i32,
+                        y: (position.y as f64 / scale).round() as i32,
+                        width: (size.width as f64 / scale).round() as u32,
+                        height: (size.height as f64 / scale).round() as u32,
                     }
                 })
                 .collect()

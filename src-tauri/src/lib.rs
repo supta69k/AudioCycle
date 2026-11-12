@@ -3,8 +3,50 @@ mod commands;
 mod instance;
 mod tray;
 
-use tauri::{Emitter, Manager, PhysicalPosition};
+use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
+
+#[cfg(windows)]
+pub fn pin_window_topmost(window: &WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, IsIconic, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    };
+
+    let Ok(raw_hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(raw_hwnd.0 as _);
+
+    unsafe {
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let target_bits = (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize;
+        if (ex_style & target_bits) != target_bits {
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | target_bits);
+        }
+
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn pin_window_topmost(window: &WebviewWindow) {
+    let _ = window.set_always_on_top(true);
+}
 
 pub fn run() {
     if handle_cli_command() {
@@ -40,6 +82,26 @@ pub fn run() {
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_position(PhysicalPosition::new(0, 180));
+                pin_window_topmost(&window);
+
+                let win_for_events = window.clone();
+                window.on_window_event(move |event| match event {
+                    WindowEvent::Focused(false)
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::Moved(_) => {
+                        pin_window_topmost(&win_for_events);
+                    }
+                    _ => {}
+                });
+
+                let win_for_watchdog = window.clone();
+                std::thread::Builder::new()
+                    .name("audiocycle-topmost-guard".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_millis(1200));
+                        pin_window_topmost(&win_for_watchdog);
+                    })
+                    .ok();
             }
 
             tray::setup_tray(&handle)?;

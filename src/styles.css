@@ -112,6 +112,16 @@ button {
     border-color 160ms ease;
 }
 
+.pod::before {
+  content: "";
+  position: absolute;
+  inset: -6px -6px -6px -18px;
+}
+
+.dock-right .pod::before {
+  inset: -6px -18px -6px -6px;
+}
+
 .pod.shape-squircle {
   border-radius: 24%;
 }

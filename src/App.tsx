@@ -327,7 +327,9 @@ export default function App() {
   }, [appWindow, position, isDragging]);
 
   useEffect(() => {
-    if (!panelOpen) setPosition((c) => snapToSide(c, monitors, settings.snapToEdges));
+    if (!panelOpen && monitors.length > 0) {
+      setPosition((c) => snapToSide(c, monitors, settings.snapToEdges));
+    }
   }, [monitors, settings.snapToEdges]);
 
   // Volume mode only makes sense on the floating pod.
@@ -870,6 +872,25 @@ export default function App() {
     );
   }
 
+  function enterPod() {
+    if (hoverLeaveTimer.current !== null) {
+      window.clearTimeout(hoverLeaveTimer.current);
+      hoverLeaveTimer.current = null;
+    }
+    setPodHovered(true);
+    setIsIdle(false);
+  }
+
+  function leavePod() {
+    if (hoverLeaveTimer.current !== null) {
+      window.clearTimeout(hoverLeaveTimer.current);
+    }
+    hoverLeaveTimer.current = window.setTimeout(() => {
+      hoverLeaveTimer.current = null;
+      setPodHovered(false);
+    }, 140);
+  }
+
   return (
     <main className={`widget-root dock-${dockSide} ${podHovered ? "pod-active" : ""}`} style={cssVars}>
       <button
@@ -880,23 +901,10 @@ export default function App() {
         onAuxClick={handleAuxClick}
         onMouseDown={handlePodMouseDown}
         onContextMenu={handleContextMenu}
-        onMouseEnter={() => {
-          if (hoverLeaveTimer.current !== null) {
-            window.clearTimeout(hoverLeaveTimer.current);
-            hoverLeaveTimer.current = null;
-          }
-          setPodHovered(true);
-          setIsIdle(false);
-        }}
-        onMouseLeave={() => {
-          if (hoverLeaveTimer.current !== null) {
-            window.clearTimeout(hoverLeaveTimer.current);
-          }
-          hoverLeaveTimer.current = window.setTimeout(() => {
-            hoverLeaveTimer.current = null;
-            setPodHovered(false);
-          }, 120);
-        }}
+        onMouseEnter={enterPod}
+        onPointerEnter={enterPod}
+        onMouseMove={enterPod}
+        onMouseLeave={leavePod}
         onPointerDown={startDrag}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
@@ -920,21 +928,12 @@ export default function App() {
         <div
           className="side-controls"
           onMouseEnter={() => {
-            if (!podHovered) return;
-            if (hoverLeaveTimer.current !== null) {
-              window.clearTimeout(hoverLeaveTimer.current);
-              hoverLeaveTimer.current = null;
-            }
+            if (podHovered) enterPod();
           }}
-          onMouseLeave={() => {
-            if (hoverLeaveTimer.current !== null) {
-              window.clearTimeout(hoverLeaveTimer.current);
-            }
-            hoverLeaveTimer.current = window.setTimeout(() => {
-              hoverLeaveTimer.current = null;
-              setPodHovered(false);
-            }, 120);
+          onMouseMove={() => {
+            if (podHovered) enterPod();
           }}
+          onMouseLeave={leavePod}
         >
           <button
             onClick={toggleMode}
