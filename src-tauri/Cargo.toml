@@ -42,5 +42,7 @@ windows = { version = "0.58", features = [
 opt-level = "s"
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Unwind (not abort) so a panic in a background thread is contained and logged
+# instead of instantly killing the whole app.
+panic = "unwind"
 strip = true

@@ -242,11 +242,9 @@ export default function App() {
   }
 
   function toggleControlPanel(force?: boolean) {
-    setPanelOpen((current) => {
-      const next = force ?? !current;
-      void applyWindowDimensions(next);
-      return next;
-    });
+    const next = force ?? !panelOpen;
+    setPanelOpen(next);
+    void applyWindowDimensions(next);
   }
 
   /* ---------------- effects ---------------- */
@@ -406,7 +404,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [panelOpen]);
+  }, [panelOpen, volumeMode]);
 
   /* ---------------- actions ---------------- */
 

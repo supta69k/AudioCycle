@@ -10,6 +10,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
+    install_crash_logger();
     if handle_cli_command() {
         return;
     }
@@ -45,7 +46,8 @@ pub fn run() {
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_position(PhysicalPosition::new(0, 180));
-                overlay::init_overlay(&window);
+                let overlay_state = app.state::<overlay::OverlayState>();
+                overlay::init_overlay(&window, overlay_state.inner());
 
                 let overlay_handle = handle.clone();
                 window.on_window_event(move |event| match event {
@@ -54,13 +56,15 @@ pub fn run() {
                             .state::<overlay::OverlayState>()
                             .mark_topmost_dirty();
                     }
+                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                        let st = overlay_handle.state::<overlay::OverlayState>();
+                        st.set_scale_factor(*scale_factor);
+                        st.mark_topmost_dirty();
+                    }
                     _ => {}
                 });
 
-                overlay::spawn_overlay_controller(
-                    window.clone(),
-                    app.state::<overlay::OverlayState>().inner(),
-                );
+                overlay::spawn_overlay_controller(window.clone(), overlay_state.inner());
             }
 
             tray::setup_tray(&handle)?;
@@ -79,6 +83,38 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run AudioCycle");
+}
+
+/// Records any panic (thread name, location, message) to
+/// `%LOCALAPPDATA%\AudioCycle\crash.log` so silent failures leave evidence.
+/// The log is capped at ~64 KB to avoid unbounded growth.
+fn install_crash_logger() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+            let dir = std::path::Path::new(&dir).join("AudioCycle");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("crash.log");
+            if std::fs::metadata(&path).map(|m| m.len() > 64 * 1024).unwrap_or(false) {
+                let _ = std::fs::remove_file(&path);
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::io::Write;
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let thread = std::thread::current();
+                let _ = writeln!(
+                    file,
+                    "[unix={secs}] v{} thread={} {info}",
+                    env!("CARGO_PKG_VERSION"),
+                    thread.name().unwrap_or("unnamed"),
+                );
+            }
+        }
+        default_hook(info);
+    }));
 }
 
 fn handle_cli_command() -> bool {

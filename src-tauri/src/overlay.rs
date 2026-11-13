@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
@@ -102,7 +102,10 @@ struct HitInternal {
 struct OverlayInner {
     hit: Mutex<HitInternal>,
     wakeup: Condvar,
+    scale_milli: AtomicU32,
+    want_ignore: AtomicBool,
     topmost_dirty: AtomicBool,
+    dispatch_queued: AtomicBool,
 }
 
 pub struct OverlayState(Arc<OverlayInner>);
@@ -116,13 +119,76 @@ impl OverlayState {
                 seq: 0,
             }),
             wakeup: Condvar::new(),
+            scale_milli: AtomicU32::new(1000),
+            want_ignore: AtomicBool::new(true),
             topmost_dirty: AtomicBool::new(false),
+            dispatch_queued: AtomicBool::new(false),
         }))
+    }
+
+    pub fn set_scale_factor(&self, scale: f64) {
+        let milli = (scale.max(1.0) * 1000.0).round() as u32;
+        self.0.scale_milli.store(milli, Ordering::Relaxed);
+        self.0.wakeup.notify_one();
     }
 
     pub fn mark_topmost_dirty(&self) {
         self.0.topmost_dirty.store(true, Ordering::Release);
         self.0.wakeup.notify_one();
+    }
+}
+
+#[cfg(windows)]
+fn exstyle_needs_repair(window: &WebviewWindow) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, IsIconic, IsWindow, IsWindowVisible, GWL_EXSTYLE, WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    };
+
+    let Ok(raw_hwnd) = window.hwnd() else {
+        return false;
+    };
+    let hwnd = HWND(raw_hwnd.0 as _);
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return false;
+        }
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let base_bits = (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0) as isize;
+        (ex_style & base_bits) != base_bits
+            || IsIconic(hwnd).as_bool()
+            || !IsWindowVisible(hwnd).as_bool()
+    }
+}
+
+#[cfg(not(windows))]
+fn exstyle_needs_repair(_window: &WebviewWindow) -> bool {
+    false
+}
+
+fn queue_main_sync(window: &WebviewWindow, shared: &Arc<OverlayInner>) {
+    if shared
+        .dispatch_queued
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let win_clone = window.clone();
+        let shared_clone = Arc::clone(shared);
+        if window
+            .app_handle()
+            .run_on_main_thread(move || {
+                shared_clone.dispatch_queued.store(false, Ordering::Release);
+                let want_ignore = shared_clone.want_ignore.load(Ordering::Acquire);
+                apply_overlay_exstyle(&win_clone, want_ignore);
+                if shared_clone.topmost_dirty.swap(false, Ordering::AcqRel) {
+                    pin_window_topmost(&win_clone);
+                }
+            })
+            .is_err()
+        {
+            shared.dispatch_queued.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -164,7 +230,10 @@ fn apply_overlay_exstyle(window: &WebviewWindow, want_ignore: bool) {
     let _ = window.set_ignore_cursor_events(want_ignore);
 }
 
-pub fn init_overlay(window: &WebviewWindow) {
+pub fn init_overlay(window: &WebviewWindow, state: &OverlayState) {
+    if let Ok(scale) = window.scale_factor() {
+        state.set_scale_factor(scale);
+    }
     apply_overlay_exstyle(window, true);
     pin_window_topmost(window);
 }
@@ -220,7 +289,7 @@ enum EvalOutcome {
 }
 
 #[cfg(windows)]
-fn evaluate_cursor(window: &WebviewWindow, shared: &OverlayInner) -> (EvalOutcome, u64) {
+fn evaluate_cursor(window: &WebviewWindow, shared: &Arc<OverlayInner>) -> (EvalOutcome, u64) {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect, IsWindow};
 
@@ -229,67 +298,61 @@ fn evaluate_cursor(window: &WebviewWindow, shared: &OverlayInner) -> (EvalOutcom
     };
     let hwnd = HWND(raw_hwnd.0 as _);
 
+    let is_alive = unsafe { IsWindow(hwnd).as_bool() };
+    if !is_alive {
+        return (EvalOutcome::WindowDestroyed, 0);
+    }
+
+    let mut pt = POINT::default();
+    let mut win_rect = RECT::default();
+    let has_coords =
+        unsafe { GetCursorPos(&mut pt).is_ok() && GetWindowRect(hwnd, &mut win_rect).is_ok() };
+    let scale = (shared.scale_milli.load(Ordering::Relaxed) as f64 / 1000.0).max(1.0);
+
     let (capture_all, want_ignore, near, changed, emit_leave, seen_seq) = {
-        let mut guard = match shared.hit.lock() {
-            Ok(g) => g,
-            Err(_) => return (EvalOutcome::Far, 0),
-        };
+        let mut guard = shared.hit.lock().unwrap_or_else(|p| p.into_inner());
         let seen_seq = guard.seq;
 
         if guard.config.capture_all {
             let changed = guard.ignoring != Some(false);
             guard.ignoring = Some(false);
             (true, false, true, changed, false, seen_seq)
-        } else {
-            let is_alive = unsafe { IsWindow(hwnd).as_bool() };
-            if !is_alive {
-                return (EvalOutcome::WindowDestroyed, seen_seq);
-            }
-
-            let mut pt = POINT::default();
-            let mut win_rect = RECT::default();
-            let has_coords =
-                unsafe { GetCursorPos(&mut pt).is_ok() && GetWindowRect(hwnd, &mut win_rect).is_ok() };
-            if !has_coords {
-                if guard.ignoring.is_none() {
-                    guard.ignoring = Some(true);
-                    (false, true, false, true, false, seen_seq)
-                } else {
-                    return (EvalOutcome::Far, seen_seq);
-                }
+        } else if !has_coords {
+            if guard.ignoring.is_none() {
+                guard.ignoring = Some(true);
+                (false, true, false, true, false, seen_seq)
             } else {
-                let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
-                let lx = (pt.x - win_rect.left) as f64 / scale;
-                let ly = (pt.y - win_rect.top) as f64 / scale;
-
-                let approach_pad = (90.0 * scale).round() as i32;
-                let near = pt.x >= win_rect.left - approach_pad
-                    && pt.x <= win_rect.right + approach_pad
-                    && pt.y >= win_rect.top - approach_pad
-                    && pt.y <= win_rect.bottom + approach_pad;
-
-                let inside = near && guard.config.regions.iter().any(|r| r.contains(lx, ly));
-                let want_ignore = !inside;
-                let prev = guard.ignoring;
-                let changed = prev != Some(want_ignore);
-                guard.ignoring = Some(want_ignore);
-                (
-                    false,
-                    want_ignore,
-                    near,
-                    changed,
-                    want_ignore && prev == Some(false),
-                    seen_seq,
-                )
+                return (EvalOutcome::Far, seen_seq);
             }
+        } else {
+            let lx = (pt.x - win_rect.left) as f64 / scale;
+            let ly = (pt.y - win_rect.top) as f64 / scale;
+
+            let approach_pad = (90.0 * scale).round() as i32;
+            let near = pt.x >= win_rect.left - approach_pad
+                && pt.x <= win_rect.right + approach_pad
+                && pt.y >= win_rect.top - approach_pad
+                && pt.y <= win_rect.bottom + approach_pad;
+
+            let inside = near && guard.config.regions.iter().any(|r| r.contains(lx, ly));
+            let want_ignore = !inside;
+            let prev = guard.ignoring;
+            let changed = prev != Some(want_ignore);
+            guard.ignoring = Some(want_ignore);
+            (
+                false,
+                want_ignore,
+                near,
+                changed,
+                want_ignore && prev == Some(false),
+                seen_seq,
+            )
         }
     };
 
     if changed {
-        let win_clone = window.clone();
-        let _ = window.app_handle().run_on_main_thread(move || {
-            apply_overlay_exstyle(&win_clone, want_ignore);
-        });
+        shared.want_ignore.store(want_ignore, Ordering::Release);
+        queue_main_sync(window, shared);
         if emit_leave {
             let _ = window.emit("overlay-cursor-leave", ());
         }
@@ -306,7 +369,7 @@ fn evaluate_cursor(window: &WebviewWindow, shared: &OverlayInner) -> (EvalOutcom
 }
 
 #[cfg(not(windows))]
-fn evaluate_cursor(_window: &WebviewWindow, shared: &OverlayInner) -> (EvalOutcome, u64) {
+fn evaluate_cursor(_window: &WebviewWindow, shared: &Arc<OverlayInner>) -> (EvalOutcome, u64) {
     let seq = shared.hit.lock().map(|g| g.seq).unwrap_or(0);
     (EvalOutcome::Far, seq)
 }
@@ -316,39 +379,54 @@ pub fn spawn_overlay_controller(window: WebviewWindow, state: &OverlayState) {
     std::thread::Builder::new()
         .name("audiocycle-overlay-guard".into())
         .spawn(move || {
-            let mut last_topmost = Instant::now();
-            loop {
-                let (outcome, seen_seq) = evaluate_cursor(&window, &shared);
-                if matches!(outcome, EvalOutcome::WindowDestroyed) {
+            // Supervisor: if the guard loop ever panics, restart it instead of
+            // leaving the overlay stuck in a click-blocking or hidden state.
+            for _attempt in 0..20 {
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    overlay_guard_loop(&window, &shared)
+                }));
+                if run.is_ok() {
                     break;
                 }
-
-                if shared.topmost_dirty.swap(false, Ordering::AcqRel)
-                    || last_topmost.elapsed() >= Duration::from_millis(2000)
-                {
-                    pin_window_topmost(&window);
-                    last_topmost = Instant::now();
-                }
-
-                let sleep_ms = match outcome {
-                    EvalOutcome::CaptureAll => 120,
-                    EvalOutcome::Near => 8,
-                    EvalOutcome::Far => 35,
-                    EvalOutcome::WindowDestroyed => break,
-                };
-
-                if let Ok(guard) = shared.hit.lock() {
-                    let _ = shared.wakeup.wait_timeout_while(
-                        guard,
-                        Duration::from_millis(sleep_ms),
-                        |g| g.seq == seen_seq && !shared.topmost_dirty.load(Ordering::Acquire),
-                    );
-                } else {
-                    std::thread::sleep(Duration::from_millis(sleep_ms));
-                }
+                std::thread::sleep(Duration::from_millis(250));
             }
         })
         .ok();
+}
+
+fn overlay_guard_loop(window: &WebviewWindow, shared: &Arc<OverlayInner>) {
+    let mut last_topmost = Instant::now();
+    loop {
+        let (outcome, seen_seq) = evaluate_cursor(window, shared);
+        if matches!(outcome, EvalOutcome::WindowDestroyed) {
+            break;
+        }
+
+        if shared.topmost_dirty.load(Ordering::Acquire)
+            || (last_topmost.elapsed() >= Duration::from_millis(2500)
+                && exstyle_needs_repair(window))
+        {
+            shared.topmost_dirty.store(true, Ordering::Release);
+            queue_main_sync(window, shared);
+            last_topmost = Instant::now();
+        } else if last_topmost.elapsed() >= Duration::from_millis(2500) {
+            last_topmost = Instant::now();
+        }
+
+        let sleep_ms = match outcome {
+            EvalOutcome::CaptureAll => 120,
+            EvalOutcome::Near => 8,
+            EvalOutcome::Far => 35,
+            EvalOutcome::WindowDestroyed => break,
+        };
+
+        let guard = shared.hit.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = shared.wakeup.wait_timeout_while(
+            guard,
+            Duration::from_millis(sleep_ms),
+            |g| g.seq == seen_seq && !shared.topmost_dirty.load(Ordering::Acquire),
+        );
+    }
 }
 
 #[tauri::command]
@@ -358,11 +436,7 @@ pub fn set_hit_regions(
     config: HitConfig,
 ) -> Result<(), String> {
     let changed = {
-        let mut guard = state
-            .0
-            .hit
-            .lock()
-            .map_err(|_| "Overlay state lock poisoned".to_string())?;
+        let mut guard = state.0.hit.lock().unwrap_or_else(|p| p.into_inner());
         if guard.config == config {
             false
         } else {

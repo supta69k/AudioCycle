@@ -22,7 +22,7 @@ use windows::{
         System::{
             Com::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-                COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, STGM_READ,
+                COINIT, COINIT_MULTITHREADED, STGM_READ,
             },
             Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
         },
@@ -42,7 +42,11 @@ struct DeviceListCache {
 }
 
 static DEVICE_CACHE: OnceLock<Mutex<DeviceListCache>> = OnceLock::new();
-static AUDIO_WORKER: OnceLock<Sender<AudioRequest>> = OnceLock::new();
+/// Sender to the current audio worker. Replaced with a fresh worker if the
+/// existing one wedges inside a stalled driver call or dies.
+static AUDIO_WORKER: Mutex<Option<Sender<AudioRequest>>> = Mutex::new(None);
+/// Upper bound for any single WASAPI operation before we give up and respawn.
+const AUDIO_WORKER_TIMEOUT: Duration = Duration::from_millis(4000);
 
 fn device_cache() -> &'static Mutex<DeviceListCache> {
     DEVICE_CACHE.get_or_init(|| Mutex::new(DeviceListCache::default()))
@@ -175,62 +179,97 @@ enum AudioRequest {
     SetMute(bool, bool, SyncSender<Result<AudioTelemetry, AudioError>>),
 }
 
-fn audio_worker_tx() -> &'static Sender<AudioRequest> {
-    AUDIO_WORKER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<AudioRequest>();
-        let _ = std::thread::Builder::new()
-            .name("audiocycle-audio-worker".into())
-            .spawn(move || unsafe {
-                let _com = ComApartmentGuard::enter(COINIT_APARTMENTTHREADED);
-                let mut cache = AudioWorkerCache::default();
-                while let Ok(req) = rx.recv() {
-                    match req {
-                        AudioRequest::ListOutputs(reply) => {
-                            let _ = reply.send(list_outputs_cached(&mut cache));
-                        }
-                        AudioRequest::ListInputs(reply) => {
-                            let _ = reply.send(list_inputs_cached(&mut cache));
-                        }
-                        AudioRequest::CycleOutput(reply) => {
-                            let _ = reply.send(cycle_device_with(&mut cache, eRender, "output"));
-                        }
-                        AudioRequest::CycleInput(reply) => {
-                            let _ = reply.send(cycle_device_with(&mut cache, eCapture, "input"));
-                        }
-                        AudioRequest::SetOutput(id, reply) => {
-                            let _ = reply.send(set_device_by_id_with(
-                                &mut cache, eRender, "output", &id,
-                            ));
-                        }
-                        AudioRequest::SetInput(id, reply) => {
-                            let _ = reply.send(set_device_by_id_with(
-                                &mut cache, eCapture, "input", &id,
-                            ));
-                        }
-                        AudioRequest::GetTelemetry(is_input, reply) => {
-                            let _ = reply.send(get_telemetry_with(&mut cache, is_input));
-                        }
-                        AudioRequest::SetVolume(is_input, level, reply) => {
-                            let _ = reply.send(set_master_volume_with(&mut cache, is_input, level));
-                        }
-                        AudioRequest::SetMute(is_input, muted, reply) => {
-                            let _ = reply.send(set_master_mute_with(&mut cache, is_input, muted));
-                        }
-                    }
+fn spawn_audio_worker() -> Option<Sender<AudioRequest>> {
+    let (tx, rx) = mpsc::channel::<AudioRequest>();
+    std::thread::Builder::new()
+        .name("audiocycle-audio-worker".into())
+        .spawn(move || unsafe {
+            // Worker threads without a Win32 message loop MUST use MTA (COINIT_MULTITHREADED)
+            // so COM never creates an unpumped OleMainThreadWndClass STA window.
+            let _com = ComApartmentGuard::enter(COINIT_MULTITHREADED);
+            let mut cache = AudioWorkerCache::default();
+            while let Ok(req) = rx.recv() {
+                // A panic inside one request must never take down the whole app:
+                // drop the reply (caller sees an error) and rebuild COM state.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_audio_request(&mut cache, req)
+                }));
+                if outcome.is_err() {
+                    cache = AudioWorkerCache::default();
                 }
-            });
-        tx
-    })
+            }
+        })
+        .ok()
+        .map(|_| tx)
+}
+
+fn current_worker() -> Option<Sender<AudioRequest>> {
+    let mut slot = AUDIO_WORKER.lock().unwrap_or_else(|p| p.into_inner());
+    if slot.is_none() {
+        *slot = spawn_audio_worker();
+    }
+    slot.clone()
+}
+
+fn reset_worker() {
+    let mut slot = AUDIO_WORKER.lock().unwrap_or_else(|p| p.into_inner());
+    // Dropping the sender lets the old (possibly wedged) thread exit once it unblocks.
+    *slot = None;
+}
+
+unsafe fn handle_audio_request(cache: &mut AudioWorkerCache, req: AudioRequest) {
+    match req {
+        AudioRequest::ListOutputs(reply) => {
+            let _ = reply.send(list_outputs_cached(cache));
+        }
+        AudioRequest::ListInputs(reply) => {
+            let _ = reply.send(list_inputs_cached(cache));
+        }
+        AudioRequest::CycleOutput(reply) => {
+            let _ = reply.send(cycle_device_with(cache, eRender, "output"));
+        }
+        AudioRequest::CycleInput(reply) => {
+            let _ = reply.send(cycle_device_with(cache, eCapture, "input"));
+        }
+        AudioRequest::SetOutput(id, reply) => {
+            let _ = reply.send(set_device_by_id_with(cache, eRender, "output", &id));
+        }
+        AudioRequest::SetInput(id, reply) => {
+            let _ = reply.send(set_device_by_id_with(cache, eCapture, "input", &id));
+        }
+        AudioRequest::GetTelemetry(is_input, reply) => {
+            let _ = reply.send(get_telemetry_with(cache, is_input));
+        }
+        AudioRequest::SetVolume(is_input, level, reply) => {
+            let _ = reply.send(set_master_volume_with(cache, is_input, level));
+        }
+        AudioRequest::SetMute(is_input, muted, reply) => {
+            let _ = reply.send(set_master_mute_with(cache, is_input, muted));
+        }
+    }
 }
 
 fn dispatch_worker<T>(make_req: impl FnOnce(SyncSender<Result<T, AudioError>>) -> AudioRequest) -> Result<T, AudioError> {
     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-    audio_worker_tx()
-        .send(make_req(reply_tx))
-        .map_err(|_| AudioError::Windows("Audio worker unavailable".into()))?;
-    reply_rx
-        .recv()
-        .map_err(|_| AudioError::Windows("Audio worker dropped response".into()))?
+    let Some(tx) = current_worker() else {
+        return Err(AudioError::Windows("Audio worker unavailable".into()));
+    };
+    if tx.send(make_req(reply_tx)).is_err() {
+        reset_worker();
+        return Err(AudioError::Windows("Audio worker unavailable".into()));
+    }
+    match reply_rx.recv_timeout(AUDIO_WORKER_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // The audio driver is stalled; abandon this worker so future calls stay responsive.
+            reset_worker();
+            Err(AudioError::Windows("Audio driver did not respond in time".into()))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            reset_worker();
+            Err(AudioError::Windows("Audio worker dropped response".into()))
+        }
+    }
 }
 
 pub fn list_outputs() -> Result<Vec<AudioDevice>, AudioError> {
