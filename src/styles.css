@@ -112,14 +112,18 @@ button {
     border-color 160ms ease;
 }
 
-.pod::before {
+.widget-root.pod-active .pod::before {
   content: "";
   position: absolute;
-  inset: -6px -6px -6px -18px;
+  top: 0;
+  bottom: 0;
+  left: -18px;
+  right: 50%;
 }
 
-.dock-right .pod::before {
-  inset: -6px -18px -6px -6px;
+.widget-root.dock-right.pod-active .pod::before {
+  left: 50%;
+  right: -18px;
 }
 
 .pod.shape-squircle {
@@ -303,6 +307,21 @@ button {
   opacity: 1;
   pointer-events: auto;
   transform: none;
+}
+
+/* Bridge the 8px gap from pod to side-controls only while hovered so moving slowly stays active. */
+.widget-root.pod-active .side-controls::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -10px;
+  width: 12px;
+}
+
+.widget-root.dock-right.pod-active .side-controls::before {
+  left: auto;
+  right: -10px;
 }
 
 .side-controls button {

@@ -1,52 +1,13 @@
 mod audio;
 mod commands;
 mod instance;
+mod overlay;
 mod tray;
 
-use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
+pub use overlay::pin_window_topmost;
+
+use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
-
-#[cfg(windows)]
-pub fn pin_window_topmost(window: &WebviewWindow) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, IsIconic, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    };
-
-    let Ok(raw_hwnd) = window.hwnd() else {
-        return;
-    };
-    let hwnd = HWND(raw_hwnd.0 as _);
-
-    unsafe {
-        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let target_bits = (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize;
-        if (ex_style & target_bits) != target_bits {
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | target_bits);
-        }
-
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
-    }
-}
-
-#[cfg(not(windows))]
-pub fn pin_window_topmost(window: &WebviewWindow) {
-    let _ = window.set_always_on_top(true);
-}
 
 pub fn run() {
     if handle_cli_command() {
@@ -57,6 +18,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(overlay::OverlayState::new())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
@@ -76,7 +38,8 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::set_window_size,
-            commands::list_monitors
+            commands::list_monitors,
+            overlay::set_hit_regions
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -94,14 +57,10 @@ pub fn run() {
                     _ => {}
                 });
 
-                let win_for_watchdog = window.clone();
-                std::thread::Builder::new()
-                    .name("audiocycle-topmost-guard".into())
-                    .spawn(move || loop {
-                        std::thread::sleep(std::time::Duration::from_millis(1200));
-                        pin_window_topmost(&win_for_watchdog);
-                    })
-                    .ok();
+                overlay::spawn_overlay_controller(
+                    window.clone(),
+                    app.state::<overlay::OverlayState>().inner(),
+                );
             }
 
             tray::setup_tray(&handle)?;

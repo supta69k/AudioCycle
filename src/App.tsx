@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
-import { X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DeviceIcon, DotRing, LevelMeter, Segmented, Toggle } from "./components/Primitives";
+import { ControlPanel } from "./components/ControlPanel";
+import { DeviceIcon, DotRing } from "./components/Primitives";
 import {
   ACCENTS,
   COMPACT_WINDOW_HEIGHT,
@@ -19,15 +19,11 @@ import {
   SIZE_MAP,
 } from "./constants/config";
 import type {
-  Accent,
   AppSettings,
   AudioDevice,
   AudioTelemetry,
-  ClickAction,
   CycleMode,
   MonitorBounds,
-  PanelView,
-  RightClickAction,
   WidgetPosition,
 } from "./types/audio";
 import {
@@ -39,6 +35,7 @@ import {
   pad2,
   snapToSide,
 } from "./utils/display";
+import { buildHitConfig } from "./utils/hitRegions";
 import { playTone } from "./utils/sound";
 
 export type {
@@ -73,7 +70,6 @@ export default function App() {
   const [meterLevel, setMeterLevel] = useState(0);
   const [toast, setToast] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
-  const [panelView, setPanelView] = useState<PanelView>("devices");
   const [autostart, setAutostart] = useState(false);
   const [volumeMode, setVolumeMode] = useState(false);
   const [podHovered, setPodHovered] = useState(false);
@@ -81,6 +77,10 @@ export default function App() {
   const hoverLeaveTimer = useRef<number | null>(null);
   const dragRaf = useRef<number | null>(null);
   const pendingPos = useRef<WidgetPosition | null>(null);
+  const podRef = useRef<HTMLButtonElement | null>(null);
+  const sideControlsRef = useRef<HTMLDivElement | null>(null);
+  const modeTagRef = useRef<HTMLDivElement | null>(null);
+  const restoreRef = useRef<HTMLButtonElement | null>(null);
 
   const dragOffset = useRef({ x: 0, y: 0 });
   const dragStarted = useRef(false);
@@ -264,6 +264,13 @@ export default function App() {
         setIsHidden(false);
         toggleControlPanel(true);
       }),
+      listen("overlay-cursor-leave", () => {
+        if (hoverLeaveTimer.current !== null) {
+          window.clearTimeout(hoverLeaveTimer.current);
+          hoverLeaveTimer.current = null;
+        }
+        setPodHovered(false);
+      }),
     ];
     return () => {
       window.clearInterval(monitorTimer);
@@ -339,6 +346,37 @@ export default function App() {
       setPodHovered(false);
     }
   }, [panelOpen, isHidden]);
+
+  // Keep native OS click-through synchronized with only visible interactive controls.
+  useEffect(() => {
+    const config = buildHitConfig({
+      panelOpen,
+      isDragging,
+      isHidden,
+      podHovered,
+      isIdle,
+      volumeMode,
+      showQuickControls: settings.showQuickControls,
+      orbShape: settings.orbShape,
+      dockSide,
+      podEl: podRef.current,
+      sideControlsEl: sideControlsRef.current,
+      modeTagEl: modeTagRef.current,
+      restoreEl: restoreRef.current,
+    });
+    void invoke("set_hit_regions", { config }).catch(() => undefined);
+  }, [
+    panelOpen,
+    isDragging,
+    isHidden,
+    podHovered,
+    isIdle,
+    volumeMode,
+    settings.orbShape,
+    settings.orbSize,
+    settings.showQuickControls,
+    dockSide,
+  ]);
 
   useEffect(() => {
     if (!toast) return;
@@ -583,7 +621,13 @@ export default function App() {
 
   if (isHidden) {
     return (
-      <button className="restore" style={cssVars} onClick={() => setIsHidden(false)} aria-label="Show AudioCycle">
+      <button
+        ref={restoreRef}
+        className="restore"
+        style={cssVars}
+        onClick={() => setIsHidden(false)}
+        aria-label="Show AudioCycle"
+      >
         <i />
       </button>
     );
@@ -591,284 +635,34 @@ export default function App() {
 
   if (panelOpen) {
     return (
-      <section className="panel" style={cssVars}>
-        <header
-          className="panel-head"
-          onPointerDown={startDrag}
-          onPointerMove={moveDrag}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-        >
-          <div className="brand">
-            <span className={`status-dot ${live ? "live" : ""}`} />
-            <span className="label">AudioCycle</span>
-          </div>
-          <Segmented
-            value={mode}
-            onChange={setMode}
-            options={[
-              { id: "output", label: "Out" },
-              { id: "input", label: "In" },
-            ]}
-          />
-          <button
-            type="button"
-            className="icon-btn"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => toggleControlPanel(false)}
-            aria-label="Close"
-            title="Close (Esc)"
-          >
-            <X size={15} strokeWidth={1.5} />
-          </button>
-        </header>
-
-        <div className="hero">
-          <div className="hero-top">
-            <span className={`live-chip ${live ? "on" : ""}`}>
-              <i />
-              {telemetry.muted ? "Muted" : live ? (mode === "output" ? "Playing" : "Hearing") : "Silent"}
-            </span>
-            <button
-              type="button"
-              className={`mute ${telemetry.muted ? "on" : ""}`}
-              onClick={handleToggleMute}
-            >
-              {telemetry.muted ? "Muted" : "Mute"}
-            </button>
-          </div>
-          <div className="readout">
-            <span className={`readout-num ${telemetry.muted ? "dim" : ""}`}>{pad2(volumePct)}</span>
-            <span className="readout-unit">%</span>
-          </div>
-          <p className="hero-device">{activeDevice?.name ?? "No device"}</p>
-          <LevelMeter
-            volume={telemetry.volume}
-            signal={meterLevel}
-            muted={telemetry.muted}
-            live={live}
-          />
-          <input
-            type="range"
-            className="slider"
-            min={0}
-            max={1}
-            step={0.01}
-            value={telemetry.muted ? 0 : telemetry.volume}
-            onChange={(e) => void handleVolumeChange(parseFloat(e.target.value))}
-            aria-label="Volume"
-          />
-        </div>
-
-        <nav className="tabs" role="tablist">
-          <button
-            role="tab"
-            aria-selected={panelView === "devices"}
-            className={panelView === "devices" ? "active" : ""}
-            onClick={() => setPanelView("devices")}
-          >
-            Devices <sup>{pad2(visibleDevices.length)}</sup>
-          </button>
-          <button
-            role="tab"
-            aria-selected={panelView === "settings"}
-            className={panelView === "settings" ? "active" : ""}
-            onClick={() => setPanelView("settings")}
-          >
-            Settings
-          </button>
-        </nav>
-
-        <div className="panel-body">
-          {panelView === "devices" && (
-            <>
-              <ul className="devices">
-                {visibleDevices.map((d, i) => {
-                  const excluded = settings.excludedDeviceIds.includes(d.id);
-                  return (
-                    <li
-                      key={d.id}
-                      className={`device ${d.is_default ? "active" : ""} ${excluded ? "skipped" : ""}`}
-                    >
-                      <button
-                        className="device-main"
-                        onClick={() => void selectSpecificDevice(mode, d.id)}
-                        title={`Switch to ${d.name}`}
-                      >
-                        <span className="idx">{pad2(i + 1)}</span>
-                        <span className="device-name">{d.name}</span>
-                        {d.is_default && <span className="badge">Active</span>}
-                      </button>
-                      <button
-                        className={`loop ${excluded ? "" : "on"}`}
-                        onClick={() => toggleDeviceExclusion(d.id)}
-                        title={
-                          excluded
-                            ? "Skipped when cycling. Click to include"
-                            : "Included when cycling. Click to skip"
-                        }
-                        aria-pressed={!excluded}
-                      >
-                        <i />
-                      </button>
-                    </li>
-                  );
-                })}
-                {visibleDevices.length === 0 && <li className="empty">No {mode} devices found</li>}
-              </ul>
-              <p className="hint">Square = included in click-to-cycle.</p>
-            </>
-          )}
-
-          {panelView === "settings" && (
-            <div className="settings">
-              <section>
-                <h3 className="label">Appearance</h3>
-                <div className="field">
-                  <span>Accent</span>
-                  <div className="swatches">
-                    {(Object.keys(ACCENTS) as Accent[]).map((a) => (
-                      <button
-                        key={a}
-                        className={`swatch ${settings.accent === a ? "active" : ""}`}
-                        style={{ background: ACCENTS[a] }}
-                        onClick={() => updateSetting("accent", a)}
-                        aria-label={a}
-                        title={a}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <div className="field">
-                  <span>Shape</span>
-                  <Segmented
-                    value={settings.orbShape}
-                    onChange={(v) => updateSetting("orbShape", v)}
-                    options={[
-                      { id: "circle", label: "Round" },
-                      { id: "squircle", label: "Soft" },
-                      { id: "square", label: "Square" },
-                    ]}
-                  />
-                </div>
-                <div className="field">
-                  <span>Size</span>
-                  <Segmented
-                    value={settings.orbSize}
-                    onChange={(v) => updateSetting("orbSize", v)}
-                    options={[
-                      { id: "compact", label: "S" },
-                      { id: "normal", label: "M" },
-                      { id: "large", label: "L" },
-                    ]}
-                  />
-                </div>
-              </section>
-
-              <section>
-                <h3 className="label">Behavior</h3>
-                <div className="field stacked">
-                  <span>Click</span>
-                  <select
-                    className="select"
-                    value={settings.clickAction}
-                    onChange={(e) => updateSetting("clickAction", e.target.value as ClickAction)}
-                  >
-                    <option value="cycle-current">Cycle current</option>
-                    <option value="cycle-output">Cycle outputs</option>
-                    <option value="cycle-input">Cycle inputs</option>
-                    <option value="open-panel">Open panel</option>
-                  </select>
-                </div>
-                <div className="field stacked">
-                  <span>Right click</span>
-                  <select
-                    className="select"
-                    value={settings.rightClickAction}
-                    onChange={(e) =>
-                      updateSetting("rightClickAction", e.target.value as RightClickAction)
-                    }
-                  >
-                    <option value="open-panel">Open panel</option>
-                    <option value="toggle-mode">Flip output / input</option>
-                    <option value="hide-widget">Hide</option>
-                  </select>
-                </div>
-                <Toggle
-                  label="Switch tone"
-                  checked={settings.switchTone}
-                  onChange={(v) => updateSetting("switchTone", v)}
-                />
-                <Toggle
-                  label="Snap to screen edge"
-                  checked={settings.snapToEdges}
-                  onChange={(v) => updateSetting("snapToEdges", v)}
-                />
-                <Toggle
-                  label="Fade when idle"
-                  checked={settings.idleAutoDim}
-                  onChange={(v) => updateSetting("idleAutoDim", v)}
-                />
-                <Toggle
-                  label="Side buttons"
-                  checked={settings.showQuickControls}
-                  onChange={(v) => updateSetting("showQuickControls", v)}
-                />
-                <Toggle
-                  label="Hover tooltip"
-                  checked={settings.showTooltip}
-                  onChange={(v) => updateSetting("showTooltip", v)}
-                />
-                <Toggle
-                  label="Switch notification"
-                  checked={settings.showToast}
-                  onChange={(v) => updateSetting("showToast", v)}
-                />
-                <Toggle
-                  label="Launch at startup"
-                  checked={autostart}
-                  onChange={() => void toggleAutostart()}
-                />
-              </section>
-
-              <section className="shortcuts">
-                <h3 className="label">Shortcuts</h3>
-                <dl>
-                  <dt>Cycle device</dt>
-                  <dd>
-                    <kbd>Alt</kbd>
-                    <kbd>Shift</kbd>
-                    <kbd>C</kbd>
-                  </dd>
-                  <dt>Show / hide</dt>
-                  <dd>
-                    <kbd>Alt</kbd>
-                    <kbd>Shift</kbd>
-                    <kbd>A</kbd>
-                  </dd>
-                  <dt>Open panel</dt>
-                  <dd>
-                    <kbd>Alt</kbd>
-                    <kbd>Shift</kbd>
-                    <kbd>S</kbd>
-                  </dd>
-                </dl>
-              </section>
-
-              <button
-                className="reset"
-                onClick={() => {
-                  setSettings(DEFAULT_SETTINGS);
-                  localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
-                  notify("Defaults restored");
-                }}
-              >
-                Reset to defaults
-              </button>
-            </div>
-          )}
-        </div>
-      </section>
+      <ControlPanel
+        mode={mode}
+        onModeChange={setMode}
+        devices={visibleDevices}
+        activeDevice={activeDevice}
+        telemetry={telemetry}
+        meterLevel={meterLevel}
+        live={live}
+        volumePct={volumePct}
+        settings={settings}
+        autostart={autostart}
+        cssVars={cssVars}
+        onDragStart={startDrag}
+        onDragMove={moveDrag}
+        onDragEnd={endDrag}
+        onClose={() => toggleControlPanel(false)}
+        onVolumeChange={(v) => void handleVolumeChange(v)}
+        onToggleMute={() => void handleToggleMute()}
+        onSelectDevice={(id) => void selectSpecificDevice(mode, id)}
+        onToggleExclusion={toggleDeviceExclusion}
+        onUpdateSetting={updateSetting}
+        onToggleAutostart={() => void toggleAutostart()}
+        onResetDefaults={() => {
+          setSettings(DEFAULT_SETTINGS);
+          localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
+          notify("Defaults restored");
+        }}
+      />
     );
   }
 
@@ -894,6 +688,7 @@ export default function App() {
   return (
     <main className={`widget-root dock-${dockSide} ${podHovered ? "pod-active" : ""}`} style={cssVars}>
       <button
+        ref={podRef}
         className={`pod shape-${settings.orbShape} ${isDragging ? "dragging" : ""} ${switching ? "switching" : ""} ${isIdle ? "idle" : ""} ${live ? "live" : ""} ${mode === "input" ? "is-input" : ""} ${volumeMode ? "vol-mode" : ""}`}
         aria-label={mode === "output" ? "Cycle audio output" : "Cycle microphone"}
         onClick={handlePrimaryClick}
@@ -918,7 +713,7 @@ export default function App() {
       </button>
 
       {volumeMode && (
-        <div className="mode-tag" role="status" aria-live="polite">
+        <div ref={modeTagRef} className="mode-tag" role="status" aria-live="polite">
           <span>VOL</span>
           <b>{pad2(volumePct)}</b>
         </div>
@@ -926,6 +721,7 @@ export default function App() {
 
       {settings.showQuickControls && !volumeMode && (
         <div
+          ref={sideControlsRef}
           className="side-controls"
           onMouseEnter={() => {
             if (podHovered) enterPod();
