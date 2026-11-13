@@ -2,7 +2,11 @@
 name = "audiocycle"
 version = "0.1.0"
 description = "A minimalist desktop audio output & input switcher for Windows."
-authors = ["AudioCycle"]
+authors = ["Supta Baul"]
+license = "MIT"
+repository = "https://github.com/supta69k/AudioCycle"
+homepage = "https://github.com/supta69k/AudioCycle"
+keywords = ["windows", "audio", "wasapi", "tauri", "utility"]
 edition = "2021"
 
 [lib]

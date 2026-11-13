@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <rect width="128" height="128" rx="32" fill="#0B0B0C" />
+  <rect x="1.5" y="1.5" width="125" height="125" rx="30.5" stroke="#262628" stroke-width="3" />
+  <circle cx="64" cy="24" r="3.2" fill="#FF4F1F" />
+  <circle cx="84" cy="29.4" r="3.2" fill="#FF4F1F" />
+  <circle cx="98.6" cy="44" r="3.2" fill="#FF4F1F" />
+  <circle cx="104" cy="64" r="3.2" fill="#FF4F1F" />
+  <circle cx="98.6" cy="84" r="3.2" fill="#FF4F1F" />
+  <circle cx="84" cy="98.6" r="3.2" fill="#FF4F1F" />
+  <circle cx="64" cy="104" r="3.2" fill="#FF4F1F" />
+  <circle cx="44" cy="98.6" r="3.2" fill="#FF4F1F" />
+  <circle cx="29.4" cy="84" r="3.2" fill="#3A3A3D" />
+  <circle cx="24" cy="64" r="3.2" fill="#3A3A3D" />
+  <circle cx="29.4" cy="44" r="3.2" fill="#FF4F1F" />
+  <circle cx="44" cy="29.4" r="3.2" fill="#FF4F1F" />
+  <path
+    d="M57 52L46 60H39C37.9 60 37 60.9 37 62V66C37 67.1 37.9 68 39 68H46L57 76V52Z"
+    stroke="#EDEDED"
+    stroke-width="3.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M66.5 55.5C69.2 58 70.5 60.8 70.5 64C70.5 67.2 69.2 70 66.5 72.5"
+    stroke="#EDEDED"
+    stroke-width="3.2"
+    stroke-linecap="round"
+  />
+  <path
+    d="M74 49.5C78.3 53.5 80.5 58.3 80.5 64C80.5 69.7 78.3 74.5 74 78.5"
+    stroke="#FF4F1F"
+    stroke-width="3.2"
+    stroke-linecap="round"
+  />
+</svg>

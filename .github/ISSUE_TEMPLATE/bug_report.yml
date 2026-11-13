@@ -1,0 +1,34 @@
+name: Bug Report
+description: Report a bug, crash, audio device issue, or overlay click-through glitch.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Hover or click the floating pod...
+        2. Open/close window...
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows Version & Display Scaling
+      description: e.g., Windows 11 23H2, 1920x1080 @ 125% scaling
+      placeholder: Windows 11 @ 100%
+    validations:
+      required: true
+  - type: input
+    id: devices
+    attributes:
+      label: Audio Hardware / Drivers (if relevant)
+      description: e.g., Realtek onboard speakers, USB DAC, SteelSeries Sonar, Voicemeeter

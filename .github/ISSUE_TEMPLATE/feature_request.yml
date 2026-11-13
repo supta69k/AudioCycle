@@ -1,0 +1,19 @@
+name: Feature Request
+description: Propose a new capability, integration, or customization option.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Workflow Need
+      description: What workflow or pain point would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Behavior
+      description: Keep in mind AudioCycle's low-overhead minimalist pod philosophy.
+    validations:
+      required: true
