@@ -1,11 +1,14 @@
 use serde::Deserialize;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum HitRegion {
     Circle {
@@ -70,7 +73,7 @@ impl HitRegion {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct HitConfig {
     pub capture_all: bool,
     pub regions: Vec<HitRegion>,
@@ -93,26 +96,87 @@ impl Default for HitConfig {
 struct HitInternal {
     config: HitConfig,
     ignoring: Option<bool>,
+    seq: u64,
 }
 
-pub struct OverlayState(Arc<Mutex<HitInternal>>);
+struct OverlayInner {
+    hit: Mutex<HitInternal>,
+    wakeup: Condvar,
+    topmost_dirty: AtomicBool,
+}
+
+pub struct OverlayState(Arc<OverlayInner>);
 
 impl OverlayState {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(HitInternal {
-            config: HitConfig::default(),
-            ignoring: None,
-        })))
+        Self(Arc::new(OverlayInner {
+            hit: Mutex::new(HitInternal {
+                config: HitConfig::default(),
+                ignoring: None,
+                seq: 0,
+            }),
+            wakeup: Condvar::new(),
+            topmost_dirty: AtomicBool::new(false),
+        }))
     }
+
+    pub fn mark_topmost_dirty(&self) {
+        self.0.topmost_dirty.store(true, Ordering::Release);
+        self.0.wakeup.notify_one();
+    }
+}
+
+#[cfg(windows)]
+fn apply_overlay_exstyle(window: &WebviewWindow, want_ignore: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, IsWindow, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    };
+
+    let Ok(raw_hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(raw_hwnd.0 as _);
+
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return;
+        }
+        let base_bits = (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0) as isize;
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let transparent_bit = WS_EX_TRANSPARENT.0 as isize;
+        let target = if want_ignore {
+            current | base_bits | transparent_bit
+        } else {
+            (current | base_bits) & !transparent_bit
+        };
+
+        // Keep WS_EX_LAYERED constant and omit SWP_FRAMECHANGED to prevent DWM surface reallocation
+        if target != current {
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, target);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_overlay_exstyle(window: &WebviewWindow, want_ignore: bool) {
+    let _ = window.set_ignore_cursor_events(want_ignore);
+}
+
+pub fn init_overlay(window: &WebviewWindow) {
+    apply_overlay_exstyle(window, true);
+    pin_window_topmost(window);
 }
 
 #[cfg(windows)]
 pub fn pin_window_topmost(window: &WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, IsIconic, IsWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-        GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-        SW_SHOWNOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        GetWindowLongPtrW, IsIconic, IsWindow, IsWindowVisible, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST,
     };
 
     let Ok(raw_hwnd) = window.hwnd() else {
@@ -125,7 +189,7 @@ pub fn pin_window_topmost(window: &WebviewWindow) {
             return;
         }
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let target_bits = (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize;
+        let target_bits = (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0) as isize;
         if (ex_style & target_bits) != target_bits {
             let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | target_bits);
         }
@@ -134,15 +198,12 @@ pub fn pin_window_topmost(window: &WebviewWindow) {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
 
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
+        let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+        if !IsWindowVisible(hwnd).as_bool() {
+            flags |= SWP_SHOWWINDOW;
+        }
+
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
     }
 }
 
@@ -159,29 +220,30 @@ enum EvalOutcome {
 }
 
 #[cfg(windows)]
-fn evaluate_cursor(window: &WebviewWindow, shared: &Mutex<HitInternal>) -> EvalOutcome {
+fn evaluate_cursor(window: &WebviewWindow, shared: &OverlayInner) -> (EvalOutcome, u64) {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect, IsWindow};
 
     let Ok(raw_hwnd) = window.hwnd() else {
-        return EvalOutcome::WindowDestroyed;
+        return (EvalOutcome::WindowDestroyed, 0);
     };
     let hwnd = HWND(raw_hwnd.0 as _);
 
-    let (capture_all, want_ignore, near, changed, emit_leave) = {
-        let mut guard = match shared.lock() {
+    let (capture_all, want_ignore, near, changed, emit_leave, seen_seq) = {
+        let mut guard = match shared.hit.lock() {
             Ok(g) => g,
-            Err(_) => return EvalOutcome::Far,
+            Err(_) => return (EvalOutcome::Far, 0),
         };
+        let seen_seq = guard.seq;
 
         if guard.config.capture_all {
             let changed = guard.ignoring != Some(false);
             guard.ignoring = Some(false);
-            (true, false, true, changed, false)
+            (true, false, true, changed, false, seen_seq)
         } else {
             let is_alive = unsafe { IsWindow(hwnd).as_bool() };
             if !is_alive {
-                return EvalOutcome::WindowDestroyed;
+                return (EvalOutcome::WindowDestroyed, seen_seq);
             }
 
             let mut pt = POINT::default();
@@ -191,9 +253,9 @@ fn evaluate_cursor(window: &WebviewWindow, shared: &Mutex<HitInternal>) -> EvalO
             if !has_coords {
                 if guard.ignoring.is_none() {
                     guard.ignoring = Some(true);
-                    (false, true, false, true, false)
+                    (false, true, false, true, false, seen_seq)
                 } else {
-                    return EvalOutcome::Far;
+                    return (EvalOutcome::Far, seen_seq);
                 }
             } else {
                 let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
@@ -211,7 +273,14 @@ fn evaluate_cursor(window: &WebviewWindow, shared: &Mutex<HitInternal>) -> EvalO
                 let prev = guard.ignoring;
                 let changed = prev != Some(want_ignore);
                 guard.ignoring = Some(want_ignore);
-                (false, want_ignore, near, changed, want_ignore && prev == Some(false))
+                (
+                    false,
+                    want_ignore,
+                    near,
+                    changed,
+                    want_ignore && prev == Some(false),
+                    seen_seq,
+                )
             }
         }
     };
@@ -219,26 +288,27 @@ fn evaluate_cursor(window: &WebviewWindow, shared: &Mutex<HitInternal>) -> EvalO
     if changed {
         let win_clone = window.clone();
         let _ = window.app_handle().run_on_main_thread(move || {
-            let _ = win_clone.set_ignore_cursor_events(want_ignore);
-            pin_window_topmost(&win_clone);
+            apply_overlay_exstyle(&win_clone, want_ignore);
         });
         if emit_leave {
             let _ = window.emit("overlay-cursor-leave", ());
         }
     }
 
-    if capture_all {
+    let outcome = if capture_all {
         EvalOutcome::CaptureAll
     } else if near {
         EvalOutcome::Near
     } else {
         EvalOutcome::Far
-    }
+    };
+    (outcome, seen_seq)
 }
 
 #[cfg(not(windows))]
-fn evaluate_cursor(_window: &WebviewWindow, _shared: &Mutex<HitInternal>) -> EvalOutcome {
-    EvalOutcome::Far
+fn evaluate_cursor(_window: &WebviewWindow, shared: &OverlayInner) -> (EvalOutcome, u64) {
+    let seq = shared.hit.lock().map(|g| g.seq).unwrap_or(0);
+    (EvalOutcome::Far, seq)
 }
 
 pub fn spawn_overlay_controller(window: WebviewWindow, state: &OverlayState) {
@@ -248,12 +318,14 @@ pub fn spawn_overlay_controller(window: WebviewWindow, state: &OverlayState) {
         .spawn(move || {
             let mut last_topmost = Instant::now();
             loop {
-                let outcome = evaluate_cursor(&window, &shared);
+                let (outcome, seen_seq) = evaluate_cursor(&window, &shared);
                 if matches!(outcome, EvalOutcome::WindowDestroyed) {
                     break;
                 }
 
-                if last_topmost.elapsed() >= Duration::from_millis(1200) {
+                if shared.topmost_dirty.swap(false, Ordering::AcqRel)
+                    || last_topmost.elapsed() >= Duration::from_millis(2000)
+                {
                     pin_window_topmost(&window);
                     last_topmost = Instant::now();
                 }
@@ -264,7 +336,16 @@ pub fn spawn_overlay_controller(window: WebviewWindow, state: &OverlayState) {
                     EvalOutcome::Far => 35,
                     EvalOutcome::WindowDestroyed => break,
                 };
-                std::thread::sleep(Duration::from_millis(sleep_ms));
+
+                if let Ok(guard) = shared.hit.lock() {
+                    let _ = shared.wakeup.wait_timeout_while(
+                        guard,
+                        Duration::from_millis(sleep_ms),
+                        |g| g.seq == seen_seq && !shared.topmost_dirty.load(Ordering::Acquire),
+                    );
+                } else {
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                }
             }
         })
         .ok();
@@ -272,15 +353,26 @@ pub fn spawn_overlay_controller(window: WebviewWindow, state: &OverlayState) {
 
 #[tauri::command]
 pub fn set_hit_regions(
-    app: AppHandle,
+    _app: AppHandle,
     state: tauri::State<'_, OverlayState>,
     config: HitConfig,
 ) -> Result<(), String> {
-    if let Ok(mut guard) = state.0.lock() {
-        guard.config = config;
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        evaluate_cursor(&window, &state.0);
+    let changed = {
+        let mut guard = state
+            .0
+            .hit
+            .lock()
+            .map_err(|_| "Overlay state lock poisoned".to_string())?;
+        if guard.config == config {
+            false
+        } else {
+            guard.config = config;
+            guard.seq = guard.seq.wrapping_add(1);
+            true
+        }
+    };
+    if changed {
+        state.0.wakeup.notify_one();
     }
     Ok(())
 }

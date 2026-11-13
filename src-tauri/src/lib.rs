@@ -45,14 +45,14 @@ pub fn run() {
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_position(PhysicalPosition::new(0, 180));
-                pin_window_topmost(&window);
+                overlay::init_overlay(&window);
 
-                let win_for_events = window.clone();
+                let overlay_handle = handle.clone();
                 window.on_window_event(move |event| match event {
-                    WindowEvent::Focused(false)
-                    | WindowEvent::Resized(_)
-                    | WindowEvent::Moved(_) => {
-                        pin_window_topmost(&win_for_events);
+                    WindowEvent::Focused(false) | WindowEvent::Resized(_) => {
+                        overlay_handle
+                            .state::<overlay::OverlayState>()
+                            .mark_topmost_dirty();
                     }
                     _ => {}
                 });

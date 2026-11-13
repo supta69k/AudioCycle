@@ -77,6 +77,8 @@ export default function App() {
   const hoverLeaveTimer = useRef<number | null>(null);
   const dragRaf = useRef<number | null>(null);
   const pendingPos = useRef<WidgetPosition | null>(null);
+  const telemetryInFlight = useRef(false);
+  const lastHitConfigJson = useRef("");
   const podRef = useRef<HTMLButtonElement | null>(null);
   const sideControlsRef = useRef<HTMLDivElement | null>(null);
   const modeTagRef = useRef<HTMLDivElement | null>(null);
@@ -134,6 +136,8 @@ export default function App() {
   }
 
   async function refreshTelemetry(target = modeRef.current) {
+    if (telemetryInFlight.current) return;
+    telemetryInFlight.current = true;
     try {
       const next = await invoke<AudioTelemetry>("get_audio_telemetry", { mode: target });
       setTelemetry((prev) => {
@@ -149,6 +153,8 @@ export default function App() {
       });
     } catch {
       // browser preview
+    } finally {
+      telemetryInFlight.current = false;
     }
   }
 
@@ -274,6 +280,9 @@ export default function App() {
     ];
     return () => {
       window.clearInterval(monitorTimer);
+      if (middleClickTimer.current !== null) window.clearTimeout(middleClickTimer.current);
+      if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+      if (dragRaf.current !== null) window.cancelAnimationFrame(dragRaf.current);
       unlisteners.forEach((p) => p.then((u) => u()).catch(() => undefined));
     };
   }, []);
@@ -364,6 +373,9 @@ export default function App() {
       modeTagEl: modeTagRef.current,
       restoreEl: restoreRef.current,
     });
+    const serialized = JSON.stringify(config);
+    if (serialized === lastHitConfigJson.current) return;
+    lastHitConfigJson.current = serialized;
     void invoke("set_hit_regions", { config }).catch(() => undefined);
   }, [
     panelOpen,
@@ -671,6 +683,7 @@ export default function App() {
       window.clearTimeout(hoverLeaveTimer.current);
       hoverLeaveTimer.current = null;
     }
+    if (podHovered && !isIdle) return;
     setPodHovered(true);
     setIsIdle(false);
   }

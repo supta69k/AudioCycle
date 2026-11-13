@@ -11,6 +11,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Extracted `ControlPanel` UI into `src/components/ControlPanel.tsx` alongside repository CI, templates, and MIT licensing.
 
 ### Fixed
+- Eliminated `AppHangB1` (`dwmapi.dll`) UI hangs by keeping `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST` constant, toggling only `WS_EX_TRANSPARENT` without `SWP_FRAMECHANGED`, using `SWP_ASYNCWINDOWPOS`, and serializing cursor hit-test evaluation through a condvar-woken guard thread.
+- Moved all WASAPI COM endpoint/telemetry operations onto a dedicated background STA worker thread (`audiocycle-audio-worker`) with RAII `CoInitializeEx`/`CoUninitialize` guards, cached `IPolicyConfig`, graceful peak-meter fallback, and non-blocking `spawn_blocking` Tauri commands.
+- Added frontend IPC backpressure protection (`telemetryInFlight` guard, `HitConfig` JSON deduplication, and hover mouse-move short-circuiting).
 - Win32 `HWND_TOPMOST` and `WS_EX_TOOLWINDOW` enforcement on display changes, focus loss, and cursor-ignore transitions so the floating pod reliably renders over active windows.
 - Logical DPI scaling and multi-monitor coordinate clamping.
 - Isolated pod hover activation cleanly to the orb geometry without invisible box triggers.

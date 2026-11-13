@@ -2,10 +2,10 @@
 
 use super::{AudioDevice, AudioError, AudioTelemetry};
 use std::{
-    cell::RefCell,
     ffi::c_void,
     sync::{
         atomic::{AtomicU64, Ordering},
+        mpsc::{self, Sender, SyncSender},
         Arc, Condvar, Mutex, OnceLock,
     },
     time::Duration,
@@ -21,8 +21,8 @@ use windows::{
         },
         System::{
             Com::{
-                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL,
-                COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, STGM_READ,
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+                COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, STGM_READ,
             },
             Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
         },
@@ -42,6 +42,7 @@ struct DeviceListCache {
 }
 
 static DEVICE_CACHE: OnceLock<Mutex<DeviceListCache>> = OnceLock::new();
+static AUDIO_WORKER: OnceLock<Sender<AudioRequest>> = OnceLock::new();
 
 fn device_cache() -> &'static Mutex<DeviceListCache> {
     DEVICE_CACHE.get_or_init(|| Mutex::new(DeviceListCache::default()))
@@ -51,6 +52,30 @@ fn bump_generation() {
     ENDPOINT_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
+/// Ensures paired `CoInitializeEx` / `CoUninitialize` lifetime on dedicated background threads.
+struct ComApartmentGuard {
+    should_uninit: bool,
+}
+
+impl ComApartmentGuard {
+    unsafe fn enter(coinit: COINIT) -> Self {
+        let hr = CoInitializeEx(None, coinit);
+        Self {
+            should_uninit: hr.is_ok(),
+        }
+    }
+}
+
+impl Drop for ComApartmentGuard {
+    fn drop(&mut self) {
+        if self.should_uninit {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
 struct EndpointSession {
     generation: u64,
     meter: Option<IAudioMeterInformation>,
@@ -58,40 +83,32 @@ struct EndpointSession {
 }
 
 #[derive(Default)]
-struct ThreadAudioCache {
-    com_initialized: bool,
-    co_initialized_here: bool,
+struct AudioWorkerCache {
     enumerator: Option<IMMDeviceEnumerator>,
+    policy: Option<IPolicyConfig>,
     output_session: Option<EndpointSession>,
     input_session: Option<EndpointSession>,
 }
 
-impl Drop for ThreadAudioCache {
-    fn drop(&mut self) {
-        self.output_session = None;
-        self.input_session = None;
-        self.enumerator = None;
-        if self.co_initialized_here {
-            unsafe {
-                windows::Win32::System::Com::CoUninitialize();
-            }
+impl AudioWorkerCache {
+    unsafe fn ensure_enumerator(&mut self) -> Result<IMMDeviceEnumerator, AudioError> {
+        if let Some(ref enumerator) = self.enumerator {
+            return Ok(enumerator.clone());
         }
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(winerr)?;
+        self.enumerator = Some(enumerator.clone());
+        Ok(enumerator)
     }
-}
 
-impl ThreadAudioCache {
-    unsafe fn ensure_enumerator(&mut self) -> Result<&IMMDeviceEnumerator, AudioError> {
-        if !self.com_initialized {
-            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            self.co_initialized_here = hr.is_ok();
-            self.com_initialized = true;
+    unsafe fn ensure_policy(&mut self) -> Result<IPolicyConfig, AudioError> {
+        if let Some(ref policy) = self.policy {
+            return Ok(policy.clone());
         }
-        if self.enumerator.is_none() {
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(winerr)?;
-            self.enumerator = Some(enumerator);
-        }
-        Ok(self.enumerator.as_ref().unwrap())
+        let policy: IPolicyConfig =
+            CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL).map_err(winerr)?;
+        self.policy = Some(policy.clone());
+        Ok(policy)
     }
 
     unsafe fn ensure_session(&mut self, is_input: bool) -> Result<&EndpointSession, AudioError> {
@@ -107,7 +124,7 @@ impl ThreadAudioCache {
 
         if !slot_matches {
             let flow = if is_input { eCapture } else { eRender };
-            let enumerator = self.ensure_enumerator()?.clone();
+            let enumerator = self.ensure_enumerator()?;
             let device_opt = enumerator.GetDefaultAudioEndpoint(flow, eConsole).ok();
             let (meter, volume) = if let Some(ref device) = device_opt {
                 (
@@ -129,11 +146,12 @@ impl ThreadAudioCache {
             }
         }
 
-        Ok(if is_input {
-            self.input_session.as_ref().unwrap()
+        let slot = if is_input {
+            self.input_session.as_ref()
         } else {
-            self.output_session.as_ref().unwrap()
-        })
+            self.output_session.as_ref()
+        };
+        slot.ok_or_else(|| AudioError::Windows("Audio session unavailable".into()))
     }
 
     fn invalidate(&mut self, is_input: bool) {
@@ -145,11 +163,119 @@ impl ThreadAudioCache {
     }
 }
 
-thread_local! {
-    static AUDIO_CACHE: RefCell<ThreadAudioCache> = RefCell::new(ThreadAudioCache::default());
+enum AudioRequest {
+    ListOutputs(SyncSender<Result<Vec<AudioDevice>, AudioError>>),
+    ListInputs(SyncSender<Result<Vec<AudioDevice>, AudioError>>),
+    CycleOutput(SyncSender<Result<AudioDevice, AudioError>>),
+    CycleInput(SyncSender<Result<AudioDevice, AudioError>>),
+    SetOutput(String, SyncSender<Result<AudioDevice, AudioError>>),
+    SetInput(String, SyncSender<Result<AudioDevice, AudioError>>),
+    GetTelemetry(bool, SyncSender<Result<AudioTelemetry, AudioError>>),
+    SetVolume(bool, f32, SyncSender<Result<AudioTelemetry, AudioError>>),
+    SetMute(bool, bool, SyncSender<Result<AudioTelemetry, AudioError>>),
+}
+
+fn audio_worker_tx() -> &'static Sender<AudioRequest> {
+    AUDIO_WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<AudioRequest>();
+        let _ = std::thread::Builder::new()
+            .name("audiocycle-audio-worker".into())
+            .spawn(move || unsafe {
+                let _com = ComApartmentGuard::enter(COINIT_APARTMENTTHREADED);
+                let mut cache = AudioWorkerCache::default();
+                while let Ok(req) = rx.recv() {
+                    match req {
+                        AudioRequest::ListOutputs(reply) => {
+                            let _ = reply.send(list_outputs_cached(&mut cache));
+                        }
+                        AudioRequest::ListInputs(reply) => {
+                            let _ = reply.send(list_inputs_cached(&mut cache));
+                        }
+                        AudioRequest::CycleOutput(reply) => {
+                            let _ = reply.send(cycle_device_with(&mut cache, eRender, "output"));
+                        }
+                        AudioRequest::CycleInput(reply) => {
+                            let _ = reply.send(cycle_device_with(&mut cache, eCapture, "input"));
+                        }
+                        AudioRequest::SetOutput(id, reply) => {
+                            let _ = reply.send(set_device_by_id_with(
+                                &mut cache, eRender, "output", &id,
+                            ));
+                        }
+                        AudioRequest::SetInput(id, reply) => {
+                            let _ = reply.send(set_device_by_id_with(
+                                &mut cache, eCapture, "input", &id,
+                            ));
+                        }
+                        AudioRequest::GetTelemetry(is_input, reply) => {
+                            let _ = reply.send(get_telemetry_with(&mut cache, is_input));
+                        }
+                        AudioRequest::SetVolume(is_input, level, reply) => {
+                            let _ = reply.send(set_master_volume_with(&mut cache, is_input, level));
+                        }
+                        AudioRequest::SetMute(is_input, muted, reply) => {
+                            let _ = reply.send(set_master_mute_with(&mut cache, is_input, muted));
+                        }
+                    }
+                }
+            });
+        tx
+    })
+}
+
+fn dispatch_worker<T>(make_req: impl FnOnce(SyncSender<Result<T, AudioError>>) -> AudioRequest) -> Result<T, AudioError> {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    audio_worker_tx()
+        .send(make_req(reply_tx))
+        .map_err(|_| AudioError::Windows("Audio worker unavailable".into()))?;
+    reply_rx
+        .recv()
+        .map_err(|_| AudioError::Windows("Audio worker dropped response".into()))?
 }
 
 pub fn list_outputs() -> Result<Vec<AudioDevice>, AudioError> {
+    dispatch_worker(AudioRequest::ListOutputs)
+}
+
+pub fn list_inputs() -> Result<Vec<AudioDevice>, AudioError> {
+    dispatch_worker(AudioRequest::ListInputs)
+}
+
+pub fn cycle_output() -> Result<AudioDevice, AudioError> {
+    dispatch_worker(AudioRequest::CycleOutput)
+}
+
+pub fn cycle_input() -> Result<AudioDevice, AudioError> {
+    dispatch_worker(AudioRequest::CycleInput)
+}
+
+pub fn set_output(device_id: &str) -> Result<AudioDevice, AudioError> {
+    let id = device_id.to_string();
+    dispatch_worker(|reply| AudioRequest::SetOutput(id, reply))
+}
+
+pub fn set_input(device_id: &str) -> Result<AudioDevice, AudioError> {
+    let id = device_id.to_string();
+    dispatch_worker(|reply| AudioRequest::SetInput(id, reply))
+}
+
+pub fn is_audio_active() -> Result<bool, AudioError> {
+    Ok(get_telemetry(false)?.active)
+}
+
+pub fn get_telemetry(is_input: bool) -> Result<AudioTelemetry, AudioError> {
+    dispatch_worker(|reply| AudioRequest::GetTelemetry(is_input, reply))
+}
+
+pub fn set_master_volume(is_input: bool, level: f32) -> Result<AudioTelemetry, AudioError> {
+    dispatch_worker(|reply| AudioRequest::SetVolume(is_input, level, reply))
+}
+
+pub fn set_master_mute(is_input: bool, muted: bool) -> Result<AudioTelemetry, AudioError> {
+    dispatch_worker(|reply| AudioRequest::SetMute(is_input, muted, reply))
+}
+
+fn list_outputs_cached(cache: &mut AudioWorkerCache) -> Result<Vec<AudioDevice>, AudioError> {
     let gen = ENDPOINT_GENERATION.load(Ordering::Acquire);
     if let Ok(guard) = device_cache().lock() {
         if let Some((cached_gen, ref list)) = guard.outputs {
@@ -159,14 +285,14 @@ pub fn list_outputs() -> Result<Vec<AudioDevice>, AudioError> {
         }
     }
 
-    let list = query_devices(eRender, "output", "Audio Output")?;
+    let list = query_devices(cache, eRender, "output", "Audio Output")?;
     if let Ok(mut guard) = device_cache().lock() {
         guard.outputs = Some((gen, list.clone()));
     }
     Ok(list)
 }
 
-pub fn list_inputs() -> Result<Vec<AudioDevice>, AudioError> {
+fn list_inputs_cached(cache: &mut AudioWorkerCache) -> Result<Vec<AudioDevice>, AudioError> {
     let gen = ENDPOINT_GENERATION.load(Ordering::Acquire);
     if let Ok(guard) = device_cache().lock() {
         if let Some((cached_gen, ref list)) = guard.inputs {
@@ -176,7 +302,7 @@ pub fn list_inputs() -> Result<Vec<AudioDevice>, AudioError> {
         }
     }
 
-    let list = query_devices(eCapture, "input", "Microphone")?;
+    let list = query_devices(cache, eCapture, "input", "Microphone")?;
     if let Ok(mut guard) = device_cache().lock() {
         guard.inputs = Some((gen, list.clone()));
     }
@@ -184,14 +310,14 @@ pub fn list_inputs() -> Result<Vec<AudioDevice>, AudioError> {
 }
 
 fn query_devices(
+    cache: &mut AudioWorkerCache,
     data_flow: EDataFlow,
     label: &'static str,
     fallback_name: &'static str,
 ) -> Result<Vec<AudioDevice>, AudioError> {
-    AUDIO_CACHE.with(|cell| unsafe {
-        let mut cache = cell.borrow_mut();
+    unsafe {
         let enumerator = cache.ensure_enumerator()?;
-        let default_id = default_device_id(enumerator, data_flow).unwrap_or_default();
+        let default_id = default_device_id(&enumerator, data_flow).unwrap_or_default();
         let collection = enumerator
             .EnumAudioEndpoints(data_flow, DEVICE_STATE_ACTIVE)
             .map_err(winerr)?;
@@ -216,52 +342,35 @@ fn query_devices(
         } else {
             Ok(devices)
         }
-    })
+    }
 }
 
-pub fn cycle_output() -> Result<AudioDevice, AudioError> {
-    cycle_device(eRender, "output")
-}
-
-pub fn cycle_input() -> Result<AudioDevice, AudioError> {
-    cycle_device(eCapture, "input")
-}
-
-pub fn set_output(device_id: &str) -> Result<AudioDevice, AudioError> {
-    set_device_by_id(eRender, "output", device_id)
-}
-
-pub fn set_input(device_id: &str) -> Result<AudioDevice, AudioError> {
-    set_device_by_id(eCapture, "input", device_id)
-}
-
-fn set_device_by_id(
+fn set_device_by_id_with(
+    cache: &mut AudioWorkerCache,
     data_flow: EDataFlow,
     label: &'static str,
     target_id: &str,
 ) -> Result<AudioDevice, AudioError> {
     let devices = if data_flow == eCapture {
-        list_inputs()?
+        list_inputs_cached(cache)?
     } else {
-        list_outputs()?
+        list_outputs_cached(cache)?
     };
     let target = devices
         .into_iter()
         .find(|d| d.id == target_id)
         .ok_or(AudioError::NoDevices(label))?;
 
-    activate_endpoint(&target.id)?;
+    activate_endpoint(cache, &target.id)?;
     Ok(AudioDevice {
         is_default: true,
         ..target
     })
 }
 
-fn activate_endpoint(endpoint_id: &str) -> Result<(), AudioError> {
+fn activate_endpoint(cache: &mut AudioWorkerCache, endpoint_id: &str) -> Result<(), AudioError> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let policy: IPolicyConfig =
-            CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL).map_err(winerr)?;
+        let policy = cache.ensure_policy()?;
         let wide_id = to_wide(endpoint_id);
 
         let mut success = false;
@@ -275,6 +384,7 @@ fn activate_endpoint(endpoint_id: &str) -> Result<(), AudioError> {
         }
 
         if !success {
+            cache.policy = None;
             if let Some(err) = last_err {
                 return Err(winerr(err));
             }
@@ -284,25 +394,23 @@ fn activate_endpoint(endpoint_id: &str) -> Result<(), AudioError> {
     Ok(())
 }
 
-pub fn is_audio_active() -> Result<bool, AudioError> {
-    Ok(get_telemetry(false)?.active)
-}
-
-pub fn get_telemetry(is_input: bool) -> Result<AudioTelemetry, AudioError> {
-    AUDIO_CACHE.with(|cell| unsafe {
-        let mut cache = cell.borrow_mut();
-        if let Ok(res) = read_cached_telemetry(&mut cache, is_input) {
+fn get_telemetry_with(
+    cache: &mut AudioWorkerCache,
+    is_input: bool,
+) -> Result<AudioTelemetry, AudioError> {
+    unsafe {
+        if let Ok(res) = read_cached_telemetry(cache, is_input, true) {
             return Ok(res);
         }
-        // Self-heal once if the cached endpoint handle was invalidated by Windows
         cache.invalidate(is_input);
-        read_cached_telemetry(&mut cache, is_input)
-    })
+        read_cached_telemetry(cache, is_input, false)
+    }
 }
 
 unsafe fn read_cached_telemetry(
-    cache: &mut ThreadAudioCache,
+    cache: &mut AudioWorkerCache,
     is_input: bool,
+    strict_meter: bool,
 ) -> Result<AudioTelemetry, AudioError> {
     let session = cache.ensure_session(is_input)?;
 
@@ -311,25 +419,30 @@ unsafe fn read_cached_telemetry(
     let mut peak_r = 0.0_f32;
 
     if let Some(ref meter) = session.meter {
-        meter.GetPeakValue(&mut peak).ok().map_err(winerr)?;
-        let mut channels = 0_u32;
-        if meter.GetMeteringChannelCount(&mut channels).is_ok() && channels >= 2 {
-            // Zero-allocation stack buffer for up to 8 channels (7.1 surround)
-            let mut stack_buf = [0.0_f32; 8];
-            if channels as usize <= stack_buf.len()
-                && meter
-                    .GetChannelsPeakValues(channels, stack_buf.as_mut_ptr())
-                    .is_ok()
-            {
-                peak_l = stack_buf[0];
-                peak_r = stack_buf[1];
+        if let Err(err) = meter.GetPeakValue(&mut peak).ok() {
+            if strict_meter {
+                return Err(winerr(err));
+            }
+        } else {
+            let mut channels = 0_u32;
+            if meter.GetMeteringChannelCount(&mut channels).is_ok() && channels >= 2 {
+                // Zero-allocation stack buffer for up to 8 channels (7.1 surround)
+                let mut stack_buf = [0.0_f32; 8];
+                if channels as usize <= stack_buf.len()
+                    && meter
+                        .GetChannelsPeakValues(channels, stack_buf.as_mut_ptr())
+                        .is_ok()
+                {
+                    peak_l = stack_buf[0];
+                    peak_r = stack_buf[1];
+                } else {
+                    peak_l = peak;
+                    peak_r = peak;
+                }
             } else {
                 peak_l = peak;
                 peak_r = peak;
             }
-        } else {
-            peak_l = peak;
-            peak_r = peak;
         }
     }
 
@@ -356,12 +469,15 @@ unsafe fn read_cached_telemetry(
     })
 }
 
-pub fn set_master_volume(is_input: bool, level: f32) -> Result<AudioTelemetry, AudioError> {
-    AUDIO_CACHE.with(|cell| unsafe {
-        let mut cache = cell.borrow_mut();
+fn set_master_volume_with(
+    cache: &mut AudioWorkerCache,
+    is_input: bool,
+    level: f32,
+) -> Result<AudioTelemetry, AudioError> {
+    unsafe {
         let clamped = level.clamp(0.0, 1.0);
 
-        let attempt = |c: &mut ThreadAudioCache| -> Result<(), AudioError> {
+        let attempt = |c: &mut AudioWorkerCache| -> Result<(), AudioError> {
             let session = c.ensure_session(is_input)?;
             let ep_vol = session
                 .volume
@@ -377,19 +493,21 @@ pub fn set_master_volume(is_input: bool, level: f32) -> Result<AudioTelemetry, A
             Ok(())
         };
 
-        if attempt(&mut cache).is_err() {
+        if attempt(cache).is_err() {
             cache.invalidate(is_input);
-            attempt(&mut cache)?;
+            attempt(cache)?;
         }
-        read_cached_telemetry(&mut cache, is_input)
-    })
+        read_cached_telemetry(cache, is_input, false)
+    }
 }
 
-pub fn set_master_mute(is_input: bool, muted: bool) -> Result<AudioTelemetry, AudioError> {
-    AUDIO_CACHE.with(|cell| unsafe {
-        let mut cache = cell.borrow_mut();
-
-        let attempt = |c: &mut ThreadAudioCache| -> Result<(), AudioError> {
+fn set_master_mute_with(
+    cache: &mut AudioWorkerCache,
+    is_input: bool,
+    muted: bool,
+) -> Result<AudioTelemetry, AudioError> {
+    unsafe {
+        let attempt = |c: &mut AudioWorkerCache| -> Result<(), AudioError> {
             let session = c.ensure_session(is_input)?;
             let ep_vol = session
                 .volume
@@ -402,19 +520,23 @@ pub fn set_master_mute(is_input: bool, muted: bool) -> Result<AudioTelemetry, Au
             Ok(())
         };
 
-        if attempt(&mut cache).is_err() {
+        if attempt(cache).is_err() {
             cache.invalidate(is_input);
-            attempt(&mut cache)?;
+            attempt(cache)?;
         }
-        read_cached_telemetry(&mut cache, is_input)
-    })
+        read_cached_telemetry(cache, is_input, false)
+    }
 }
 
-fn cycle_device(data_flow: EDataFlow, label: &'static str) -> Result<AudioDevice, AudioError> {
+fn cycle_device_with(
+    cache: &mut AudioWorkerCache,
+    data_flow: EDataFlow,
+    label: &'static str,
+) -> Result<AudioDevice, AudioError> {
     let devices = if data_flow == eCapture {
-        list_inputs()?
+        list_inputs_cached(cache)?
     } else {
-        list_outputs()?
+        list_outputs_cached(cache)?
     };
     if devices.is_empty() {
         return Err(AudioError::NoDevices(label));
@@ -427,7 +549,7 @@ fn cycle_device(data_flow: EDataFlow, label: &'static str) -> Result<AudioDevice
     let next_index = (current_index + 1) % devices.len();
     let next = devices[next_index].clone();
 
-    activate_endpoint(&next.id)?;
+    activate_endpoint(cache, &next.id)?;
 
     Ok(AudioDevice {
         is_default: true,
@@ -516,7 +638,7 @@ where
     std::thread::Builder::new()
         .name("audiocycle-wasapi-events".into())
         .spawn(move || unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let _com = ComApartmentGuard::enter(COINIT_MULTITHREADED);
             let Ok(enumerator) =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
             else {
