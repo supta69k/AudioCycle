@@ -4,15 +4,13 @@
   <p><b>Zero-clutter floating Windows audio output &amp; microphone switcher powered by Tauri 2, Rust CoreAudio (WASAPI), and React.</b></p>
 
   <p>
-    <a href="https://github.com/supta69k/AudioCycle/actions/workflows/ci.yml">
-      <img src="https://img.shields.io/github/actions/workflow/status/supta69k/AudioCycle/ci.yml?branch=main&style=flat-square&label=CI" alt="CI Status" />
-    </a>
     <a href="https://github.com/supta69k/AudioCycle/releases">
       <img src="https://img.shields.io/github/v/release/supta69k/AudioCycle?include_prereleases&style=flat-square" alt="Release" />
     </a>
     <a href="LICENSE">
       <img src="https://img.shields.io/github/license/supta69k/AudioCycle?style=flat-square" alt="License" />
     </a>
+    <img src="https://img.shields.io/badge/Tauri-v2%20%C2%B7%20Rust-FFC131?style=flat-square" alt="Tauri v2 &amp; Rust" />
     <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=flat-square" alt="Windows 10 / 11" />
     <a href="https://github.com/supta69k/AudioCycle/stargazers">
       <img src="https://img.shields.io/github/stars/supta69k/AudioCycle?style=flat-square" alt="Stars" />
