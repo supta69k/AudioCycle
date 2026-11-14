@@ -14,10 +14,14 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit AudioCycle", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&cycle_now, &show_hide, &startup, &settings, &quit])?;
 
-    TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::new()
         .tooltip("AudioCycle")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(false);
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    builder
         .on_menu_event(|app, event| match event.id.as_ref() {
             "cycle_now" => {
                 let _ = app.emit("cycle-active-shortcut", ());
@@ -26,12 +30,18 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 let _ = app.emit("toggle-widget", ());
             }
             "startup" => {
-                let autostart = app.autolaunch();
-                let _ = if autostart.is_enabled().unwrap_or(false) {
-                    autostart.disable()
-                } else {
-                    autostart.enable()
-                };
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let autostart = app_handle.autolaunch();
+                    let next = !autostart.is_enabled().unwrap_or(false);
+                    let _ = if next {
+                        autostart.enable()
+                    } else {
+                        autostart.disable()
+                    };
+                    let actual = autostart.is_enabled().unwrap_or(next);
+                    let _ = app_handle.emit("autostart-changed", actual);
+                });
             }
             "settings" => {
                 let _ = app.emit("open-settings", ());
@@ -77,6 +87,18 @@ pub fn setup_shortcuts(app: &AppHandle) -> tauri::Result<()> {
             })
     {
         eprintln!("failed to register cycle global shortcut: {error}");
+    }
+
+    let panel_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyS);
+    if let Err(error) =
+        app.global_shortcut()
+            .on_shortcut(panel_shortcut, |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    let _ = app.emit("toggle-panel", ());
+                }
+            })
+    {
+        eprintln!("failed to register panel global shortcut: {error}");
     }
 
     Ok(())

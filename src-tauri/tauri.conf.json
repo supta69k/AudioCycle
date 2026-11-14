@@ -11,7 +11,7 @@
   },
   "app": {
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' asset: https://asset.localhost data:; connect-src ipc: http://ipc.localhost"
     },
     "windows": [
       {
@@ -27,13 +27,35 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "shadow": false,
-        "visible": true
+        "visible": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-networking"
       }
     ]
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico"]
+    "publisher": "Supta Baul",
+    "category": "Utility",
+    "shortDescription": "Minimalist floating Windows audio output and microphone switcher.",
+    "longDescription": "Zero-clutter floating Windows audio output and microphone switcher with exact geometric click-through, instant Console/Multimedia/Communications role switching, and real-time WASAPI stereo VU telemetry.",
+    "copyright": "Copyright © 2026 Supta Baul",
+    "homepage": "https://github.com/supta69k/AudioCycle",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

@@ -89,6 +89,14 @@ export default function App() {
   const savedOrbPosition = useRef<WidgetPosition | null>(null);
   const modeRef = useRef<CycleMode>(mode);
   modeRef.current = mode;
+  const panelOpenRef = useRef(panelOpen);
+  panelOpenRef.current = panelOpen;
+  const positionRef = useRef(position);
+  positionRef.current = position;
+  const monitorsRef = useRef(monitors);
+  monitorsRef.current = monitors;
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   const appWindow = useMemo(() => {
     try {
@@ -231,18 +239,30 @@ export default function App() {
       }
     }
     if (open) {
-      savedOrbPosition.current = position;
-      const clamped = clampPosition(position, monitors, PANEL_WINDOW_WIDTH, PANEL_WINDOW_HEIGHT);
-      if (clamped.x !== position.x || clamped.y !== position.y) setPosition(clamped);
+      savedOrbPosition.current = positionRef.current;
+      const clamped = clampPosition(
+        positionRef.current,
+        monitorsRef.current,
+        PANEL_WINDOW_WIDTH,
+        PANEL_WINDOW_HEIGHT,
+      );
+      if (clamped.x !== positionRef.current.x || clamped.y !== positionRef.current.y) {
+        setPosition(clamped);
+      }
     } else if (savedOrbPosition.current) {
-      const restored = snapToSide(savedOrbPosition.current, monitors, settings.snapToEdges);
+      const restored = snapToSide(
+        savedOrbPosition.current,
+        monitorsRef.current,
+        settingsRef.current.snapToEdges,
+      );
       savedOrbPosition.current = null;
       setPosition(restored);
     }
   }
 
   function toggleControlPanel(force?: boolean) {
-    const next = force ?? !panelOpen;
+    const next = force ?? !panelOpenRef.current;
+    panelOpenRef.current = next;
     setPanelOpen(next);
     void applyWindowDimensions(next);
   }
@@ -267,6 +287,13 @@ export default function App() {
       listen("open-settings", () => {
         setIsHidden(false);
         toggleControlPanel(true);
+      }),
+      listen("toggle-panel", () => {
+        setIsHidden(false);
+        toggleControlPanel();
+      }),
+      listen<boolean>("autostart-changed", (ev) => {
+        setAutostart(Boolean(ev.payload));
       }),
       listen("overlay-cursor-leave", () => {
         if (hoverLeaveTimer.current !== null) {
@@ -396,15 +423,24 @@ export default function App() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.altKey && e.shiftKey && e.code === "KeyA") setIsHidden((c) => !c);
-      else if (e.altKey && e.shiftKey && e.code === "KeyS") toggleControlPanel();
-      else if (e.altKey && e.shiftKey && e.code === "KeyC") void cycleTargetMode(modeRef.current);
-      else if (e.key === "Escape" && volumeMode) setVolumeMode(false);
+      if (
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && ["KeyR", "KeyF", "KeyP", "KeyG", "KeyU"].includes(e.code))
+      ) {
+        e.preventDefault();
+        return;
+      }
+      if (!appWindow) {
+        if (e.altKey && e.shiftKey && e.code === "KeyA") setIsHidden((c) => !c);
+        else if (e.altKey && e.shiftKey && e.code === "KeyS") toggleControlPanel();
+        else if (e.altKey && e.shiftKey && e.code === "KeyC") void cycleTargetMode(modeRef.current);
+      }
+      if (e.key === "Escape" && volumeMode) setVolumeMode(false);
       else if (e.key === "Escape" && panelOpen) toggleControlPanel(false);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [panelOpen, volumeMode]);
+  }, [appWindow, panelOpen, volumeMode]);
 
   /* ---------------- actions ---------------- */
 
